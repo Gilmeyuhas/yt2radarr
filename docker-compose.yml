@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  yt2radarr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: yt2radarr
+    restart: unless-stopped
+
+    ports:
+      - "5010:5000"
+
