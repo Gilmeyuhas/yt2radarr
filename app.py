@@ -1,17 +1,105 @@
+import json
 import os
 import re
 import subprocess
 from typing import Dict, List, Optional
 
 import requests
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 app = Flask(__name__)
 
-RADARR_URL = os.environ.get("RADARR_URL", "http://localhost:7878")
-RADARR_API_KEY = os.environ.get("RADARR_API_KEY", "YOUR_RADARR_API_KEY")
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+
+
+def _default_config() -> Dict:
+    return {
+        "radarr_url": (os.environ.get("RADARR_URL") or "").rstrip("/"),
+        "radarr_api_key": os.environ.get("RADARR_API_KEY") or "",
+        "file_paths": [],
+    }
+
+
+_config_cache: Optional[Dict] = None
 
 _movies_cache: Optional[List[Dict]] = None
+
+
+def load_config() -> Dict:
+    """Load configuration from disk or environment defaults."""
+
+    global _config_cache
+    if _config_cache is not None:
+        return _config_cache
+
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            if not isinstance(data, dict):
+                raise ValueError("Invalid configuration format")
+            # Ensure expected keys are present.
+            config = _default_config()
+            config.update(data)
+    except FileNotFoundError:
+        config = _default_config()
+    except Exception as exc:  # pragma: no cover - configuration file errors
+        print(f"Failed to load configuration: {exc}")
+        config = _default_config()
+
+    config["radarr_url"] = (config.get("radarr_url") or "").strip().rstrip("/")
+    config["radarr_api_key"] = (config.get("radarr_api_key") or "").strip()
+    file_paths = config.get("file_paths", [])
+    if not isinstance(file_paths, list):
+        file_paths = [str(file_paths)] if file_paths else []
+    config["file_paths"] = [os.path.abspath(os.path.expanduser(str(path))) for path in file_paths]
+
+    _config_cache = config
+    return config
+
+
+def save_config(config: Dict) -> None:
+    """Persist configuration to disk and reset caches."""
+
+    global _config_cache, _movies_cache
+    os.makedirs(os.path.dirname(CONFIG_PATH) or ".", exist_ok=True)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+    _config_cache = config
+    _movies_cache = None
+
+
+def is_configured(config: Optional[Dict] = None) -> bool:
+    """Return True when the application has been configured."""
+
+    cfg = config or load_config()
+    return bool(cfg.get("radarr_url") and cfg.get("radarr_api_key") and cfg.get("file_paths"))
+
+
+def normalize_paths(raw_paths: str) -> List[str]:
+    """Convert newline-separated paths into cleaned absolute paths."""
+
+    paths: List[str] = []
+    for line in raw_paths.splitlines():
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        expanded = os.path.abspath(os.path.expanduser(cleaned))
+        if expanded not in paths:
+            paths.append(expanded)
+    return paths
+
+
+@app.before_request
+def ensure_configured() -> Optional[object]:
+    """Redirect to the setup flow if the app has not been configured yet."""
+
+    if request.endpoint in {"static", "setup"}:
+        return None
+    if request.endpoint is None:
+        return None
+    if is_configured():
+        return None
+    return redirect(url_for("setup"))
 
 
 def get_all_movies() -> List[Dict]:
@@ -20,10 +108,14 @@ def get_all_movies() -> List[Dict]:
     if _movies_cache is not None:
         return _movies_cache
 
+    config = load_config()
+    if not is_configured(config):
+        return []
+
     try:
         response = requests.get(
-            f"{RADARR_URL}/api/v3/movie",
-            headers={"X-Api-Key": RADARR_API_KEY},
+            f"{config['radarr_url']}/api/v3/movie",
+            headers={"X-Api-Key": config["radarr_api_key"]},
             timeout=10,
         )
         response.raise_for_status()
@@ -87,11 +179,16 @@ def resolve_movie_by_metadata(
 @app.route("/", methods=["GET"])
 def index():
     movies = get_all_movies()
-    return render_template("index.html", movies=movies)
+    config = load_config()
+    return render_template("index.html", movies=movies, configured=is_configured(config))
 
 
 @app.route("/create", methods=["POST"])
 def create():
+    config = load_config()
+    if not is_configured(config):
+        return jsonify({"logs": ["ERROR: Application has not been configured yet."]}), 503
+
     data = request.get_json(silent=True) or {}
     logs: List[str] = []
     errors: List[str] = []
@@ -151,8 +248,8 @@ def create():
     try:
         log(f"Fetching Radarr details for movie ID {movie_id}.")
         response = requests.get(
-            f"{RADARR_URL}/api/v3/movie/{movie_id}",
-            headers={"X-Api-Key": RADARR_API_KEY},
+            f"{config['radarr_url']}/api/v3/movie/{movie_id}",
+            headers={"X-Api-Key": config["radarr_api_key"]},
             timeout=10,
         )
         response.raise_for_status()
@@ -162,10 +259,12 @@ def create():
         return jsonify({"logs": logs}), 502
 
     movie_path = movie.get("path")
-    if not movie_path or not os.path.isdir(movie_path):
+    resolved_path = resolve_movie_path(movie_path, config)
+    if resolved_path is None:
         error(f"Movie folder not found on disk: {movie_path}")
         return jsonify({"logs": logs}), 400
 
+    movie_path = resolved_path
     log(f"Movie path resolved to '{movie_path}'.")
 
     folder_map = {
@@ -269,6 +368,61 @@ def create():
 
     log(f"Success! Video downloaded to '{target_path}'.")
     return jsonify({"logs": logs}), 200
+
+
+def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[str]:
+    """Resolve a movie folder path using configured library paths."""
+
+    if original_path and os.path.isdir(original_path):
+        return original_path
+
+    if not original_path:
+        return None
+
+    folder_name = os.path.basename(original_path.rstrip(os.sep))
+    if not folder_name:
+        return None
+
+    for base_path in config.get("file_paths", []):
+        candidate = os.path.join(base_path, folder_name)
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    config = load_config().copy()
+    errors: List[str] = []
+
+    if request.method == "POST":
+        radarr_url = (request.form.get("radarr_url") or "").strip().rstrip("/")
+        api_key = (request.form.get("radarr_api_key") or "").strip()
+        raw_paths = request.form.get("file_paths") or ""
+        file_paths = normalize_paths(raw_paths)
+
+        if not radarr_url:
+            errors.append("Radarr URL is required.")
+        elif not re.match(r"^https?://", radarr_url):
+            errors.append("Radarr URL must start with http:// or https://.")
+        if not api_key:
+            errors.append("Radarr API key is required.")
+        if not file_paths:
+            errors.append("At least one library path is required.")
+
+        config.update(
+            {
+                "radarr_url": radarr_url,
+                "radarr_api_key": api_key,
+                "file_paths": file_paths,
+            }
+        )
+
+        if not errors:
+            save_config(config)
+            return redirect(url_for("index"))
+
+    return render_template("setup.html", config=config, errors=errors, configured=is_configured(config))
 
 
 if __name__ == "__main__":
