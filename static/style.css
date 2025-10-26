@@ -1,0 +1,94 @@
+/* General page styles */
+body {
+  background-color: #1e1e1e;
+  color: #e0e0e0;
+  font-family: sans-serif;
+  margin: 0;
+  padding: 0;
+}
+.container {
+  max-width: 600px;
+  margin: 40px auto;
+  padding: 20px;
+}
+h1 {
+  text-align: center;
+  margin-bottom: 20px;
+}
+h2 {
+  margin-top: 30px;
+  font-size: 1.2em;
+}
+
+/* Form styles */
+form {
+  background: #2a2a2a;
+  padding: 20px;
+  border: 1px solid #3a3a3a;
+  border-radius: 5px;
+}
+.form-group {
+  display: flex;
+  align-items: center;
+  margin-bottom: 15px;
+}
+.form-group label {
+  width: 140px;
+  margin-right: 10px;
+  text-align: right;
+}
+.form-group input,
+.form-group select {
+  flex: 1;
+  padding: 5px;
+  font-size: 1em;
+  color: #e0e0e0;
+  background: #3a3a3a;
+  border: 1px solid #555;
+  border-radius: 3px;
+}
+.form-group input:focus,
+.form-group select:focus {
+  outline: none;
+  border-color: #777;
+}
+.form-check {
+  margin: 10px 0;
+}
+.form-check input[type="checkbox"] {
+  transform: scale(1.2);
+  margin-right: 5px;
+  cursor: pointer;
+}
+.form-check label {
+  display: inline-block;
+  cursor: pointer;
+}
+button[type="submit"] {
+  background: #4e8ef7;
+  color: #fff;
+  border: none;
+  padding: 8px 16px;
+  font-size: 1em;
+  border-radius: 3px;
+  cursor: pointer;
+}
+button[type="submit"]:hover {
+  background: #3b78d8;
+}
+
+/* Debug console styles */
+.debug-console {
+  background: #111;
+  color: #e0e0e0;
+  font-family: monospace;
+  font-size: 0.95em;
+  padding: 10px;
+  border: 1px solid #333;
+  height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+.debug-console .error-line {
+  color: #ff5555;
+}
