@@ -8,7 +8,10 @@
 </head>
 <body>
   <div class="container">
-    <h1>Radarr YouTube Video Importer</h1>
+    <div class="header">
+      <h1>Radarr YouTube Video Importer</h1>
+      <a class="link-button" href="{{ url_for('setup') }}">Settings</a>
+    </div>
     <form id="movieForm" novalidate>
       <div class="form-group">
         <label for="yturl">YouTube URL</label>

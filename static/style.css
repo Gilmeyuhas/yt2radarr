@@ -15,6 +15,17 @@ h1 {
   text-align: center;
   margin-bottom: 20px;
 }
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.header h1 {
+  margin: 0;
+  text-align: left;
+}
 h2 {
   margin-top: 30px;
   font-size: 1.2em;
@@ -38,7 +49,8 @@ form {
   text-align: right;
 }
 .form-group input,
-.form-group select {
+.form-group select,
+.form-group textarea {
   flex: 1;
   padding: 5px;
   font-size: 1em;
@@ -48,9 +60,14 @@ form {
   border-radius: 3px;
 }
 .form-group input:focus,
-.form-group select:focus {
+.form-group select:focus,
+.form-group textarea:focus {
   outline: none;
   border-color: #777;
+}
+.form-group textarea {
+  resize: vertical;
+  min-height: 90px;
 }
 .form-check {
   margin: 10px 0;
@@ -75,6 +92,39 @@ button[type="submit"] {
 }
 button[type="submit"]:hover {
   background: #3b78d8;
+}
+.link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  background: #3a3a3a;
+  border: 1px solid #555;
+  border-radius: 3px;
+  color: #e0e0e0;
+  text-decoration: none;
+  font-size: 0.95em;
+  transition: background 0.2s ease;
+}
+.link-button:hover {
+  background: #4a4a4a;
+}
+.alerts {
+  margin-bottom: 20px;
+}
+.alert {
+  background: #3a2a2a;
+  border: 1px solid #aa5555;
+  color: #ffaaaa;
+  padding: 10px 12px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+.help-text {
+  font-size: 0.85em;
+  color: #b0b0b0;
+  margin-top: -10px;
+  margin-bottom: 15px;
 }
 
 /* Debug console styles */

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Initial Setup - Radarr YouTube Video Importer</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Radarr YouTube Video Importer</h1>
+      {% if configured %}
+        <a class="link-button" href="{{ url_for('index') }}">Back to App</a>
+      {% endif %}
+    </div>
+
+    <form method="post" novalidate>
+      <h2>Initial Configuration</h2>
+      <p class="help-text">Provide the details below so the app can connect to Radarr and locate your movie library.</p>
+
+      {% if errors %}
+        <div class="alerts">
+          {% for error in errors %}
+            <div class="alert">{{ error }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      <div class="form-group">
+        <label for="radarr_url">Radarr URL</label>
+        <input
+          type="url"
+          id="radarr_url"
+          name="radarr_url"
+          placeholder="http://localhost:7878"
+          value="{{ config.get('radarr_url', '') }}"
+          required
+        />
+      </div>
+
+      <div class="form-group">
+        <label for="radarr_api_key">Radarr API Key</label>
+        <input
+          type="text"
+          id="radarr_api_key"
+          name="radarr_api_key"
+          placeholder="Paste your Radarr API key"
+          value="{{ config.get('radarr_api_key', '') }}"
+          required
+        />
+      </div>
+
+      <div class="form-group">
+        <label for="file_paths">Movie Library Paths</label>
+        <textarea
+          id="file_paths"
+          name="file_paths"
+          placeholder="One accessible path per line"
+          required
+        >{{- config.get('file_paths', []) | join('\n') -}}</textarea>
+      </div>
+      <p class="help-text">List each directory that contains your Radarr-managed movies, one per line.</p>
+
+      <button type="submit">Save Configuration</button>
+    </form>
+  </div>
+</body>
+</html>
