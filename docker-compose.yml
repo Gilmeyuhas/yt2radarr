@@ -10,4 +10,6 @@ services:
 
     ports:
       - "5010:5000"
+    volumes:
+      - /Users/gil/Downloads/test:/Movies
 
