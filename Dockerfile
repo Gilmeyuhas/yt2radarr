@@ -11,7 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create a non-root user and switch to it
-RUN useradd -m appuser && chown -R appuser /app
+RUN useradd -m appuser \
+    && mkdir -p /home/appuser/.config/google-chrome/Default \
+    && chown -R appuser /app /home/appuser/.config
 USER appuser
 
 # Set environment variables for Flask

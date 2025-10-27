@@ -12,4 +12,5 @@ services:
       - "5010:5000"
     volumes:
       - /Users/gil/Downloads/test:/Movies
+      - "${HOME}/Library/Application Support/Google/Chrome/Default:/home/appuser/.config/google-chrome/Default:ro"
 
