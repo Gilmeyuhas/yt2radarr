@@ -13,8 +13,10 @@ from jobs import JobRepository
 
 app = Flask(__name__)
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-JOBS_PATH = os.path.join(os.path.dirname(__file__), "jobs.json")
+COOKIE_PATH = os.environ.get("YT_COOKIE_FILE")
+CONFIG_BASE = os.environ.get("YT2RADARR_CONFIG_DIR", os.path.dirname(__file__))
+CONFIG_PATH = os.path.join(CONFIG_BASE, "config.json")
+JOBS_PATH = os.path.join(CONFIG_BASE, "jobs.json")
 
 def _default_config() -> Dict:
     return {
@@ -488,12 +490,12 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         else:
             try:
                 log("Querying yt-dlp for video title.")
+                yt_cmd = ["yt-dlp", "--get-title"]
+                if COOKIE_PATH:
+                    yt_cmd += ["--cookies", COOKIE_PATH]
+                yt_cmd.append(yt_url)
                 proc = subprocess.run(
-                    [
-                        "yt-dlp",
-                        "--get-title",
-                        yt_url,
-                    ],
+                    yt_cmd,
                     capture_output=True,
                     text=True,
                     check=True,
@@ -542,10 +544,10 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             format_selector,
             "--merge-output-format",
             extension,
-            "-o",
-            target_path,
-            yt_url,
         ]
+        if COOKIE_PATH:
+            command += ["--cookies", COOKIE_PATH]
+        command += ["-o", target_path, yt_url]
 
         log(f"Running yt-dlp with format '{format_selector}'.")
         _job_status(job_id, "processing", progress=20)
