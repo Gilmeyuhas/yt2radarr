@@ -490,7 +490,13 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             try:
                 log("Querying yt-dlp for video title.")
                 proc = subprocess.run(
-                    ["yt-dlp", "--get-title", yt_url],
+                    [
+                        "yt-dlp",
+                        "--cookies-from-browser",
+                        "chrome",
+                        "--get-title",
+                        yt_url,
+                    ],
                     capture_output=True,
                     text=True,
                     check=True,
@@ -534,6 +540,8 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         format_selector = build_format_selector(resolution)
         command = [
             "yt-dlp",
+            "--cookies-from-browser",
+            "chrome",
             "--newline",
             "-f",
             format_selector,
