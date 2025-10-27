@@ -4,7 +4,7 @@ import re
 import subprocess
 import threading
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from flask import Flask, jsonify, redirect, render_template, request, url_for
@@ -22,6 +22,7 @@ def _default_config() -> Dict:
         "radarr_url": (os.environ.get("RADARR_URL") or "").rstrip("/"),
         "radarr_api_key": os.environ.get("RADARR_API_KEY") or "",
         "file_paths": [],
+        "path_overrides": [],
     }
 
 
@@ -46,6 +47,40 @@ def _mark_job_success(job_id: str) -> None:
 
 def _job_status(job_id: str, status: str, progress: Optional[float] = None) -> None:
     jobs_repo.status(job_id, status, progress=progress)
+
+
+def _clean_override_entry(remote: str, local: str) -> Optional[Dict[str, str]]:
+    """Return a normalized override entry or None when invalid."""
+
+    remote = (remote or "").strip()
+    local = (local or "").strip()
+    if not remote or not local:
+        return None
+
+    remote_path = remote.rstrip("/\\") or remote
+    local_path = os.path.abspath(os.path.expanduser(local))
+    return {"remote": remote_path, "local": local_path}
+
+
+def sanitize_override_entries(overrides: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Validate existing override entries that came from disk."""
+
+    cleaned: List[Dict[str, str]] = []
+    seen: set = set()
+
+    for entry in overrides:
+        if not isinstance(entry, dict):
+            continue
+        candidate = _clean_override_entry(entry.get("remote", ""), entry.get("local", ""))
+        if not candidate:
+            continue
+        marker = (candidate["remote"], candidate["local"])
+        if marker in seen:
+            continue
+        seen.add(marker)
+        cleaned.append(candidate)
+
+    return cleaned
 
 
 def load_config() -> Dict:
@@ -75,6 +110,11 @@ def load_config() -> Dict:
     if not isinstance(file_paths, list):
         file_paths = [str(file_paths)] if file_paths else []
     config["file_paths"] = [os.path.abspath(os.path.expanduser(str(path))) for path in file_paths]
+
+    overrides_raw = config.get("path_overrides", [])
+    if not isinstance(overrides_raw, list):
+        overrides_raw = []
+    config["path_overrides"] = sanitize_override_entries(overrides_raw)
 
     _config_cache = config
     return config
@@ -110,6 +150,38 @@ def normalize_paths(raw_paths: str) -> List[str]:
         if expanded not in paths:
             paths.append(expanded)
     return paths
+
+
+def parse_path_overrides(raw_overrides: str) -> Tuple[List[Dict[str, str]], List[str]]:
+    """Parse overrides entered in the setup form."""
+
+    overrides: List[Dict[str, str]] = []
+    errors: List[str] = []
+    seen: set = set()
+
+    for index, line in enumerate(raw_overrides.splitlines(), start=1):
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        if "=>" not in cleaned:
+            errors.append(
+                f"Line {index} must use the 'radarr/path => /local/path' format: {cleaned!r}"
+            )
+            continue
+        remote_raw, local_raw = cleaned.split("=>", 1)
+        entry = _clean_override_entry(remote_raw, local_raw)
+        if not entry:
+            errors.append(
+                f"Line {index} is missing a remote or local path: {cleaned!r}"
+            )
+            continue
+        marker = (entry["remote"], entry["local"])
+        if marker in seen:
+            continue
+        seen.add(marker)
+        overrides.append(entry)
+
+    return overrides, errors
 
 
 @app.before_request
@@ -548,6 +620,30 @@ def job_detail(job_id: str):
     return jsonify({"job": job})
 
 
+def _apply_path_overrides(original_path: str, overrides: List[Dict[str, str]]) -> Optional[str]:
+    """Return the first override that matches the Radarr path."""
+
+    normalized_original = os.path.normpath(original_path).replace("\\", "/")
+
+    for entry in overrides:
+        remote = os.path.normpath(entry["remote"]).replace("\\", "/")
+        local = entry["local"]
+
+        if normalized_original == remote:
+            candidate = local
+        elif normalized_original.startswith(remote + "/"):
+            remainder = normalized_original[len(remote) + 1 :]
+            candidate = os.path.join(local, remainder)
+        else:
+            continue
+
+        candidate_path = os.path.normpath(candidate)
+        if os.path.isdir(candidate_path):
+            return candidate_path
+
+    return None
+
+
 def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[str]:
     """Resolve a movie folder path using configured library paths."""
 
@@ -557,7 +653,13 @@ def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[s
     if not original_path:
         return None
 
-    folder_name = os.path.basename(original_path.rstrip(os.sep))
+    overrides = config.get("path_overrides", [])
+    if overrides:
+        override_path = _apply_path_overrides(str(original_path), overrides)
+        if override_path:
+            return override_path
+
+    folder_name = os.path.basename(str(original_path).rstrip(os.sep))
     if not folder_name:
         return None
 
@@ -565,6 +667,7 @@ def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[s
         candidate = os.path.join(base_path, folder_name)
         if os.path.isdir(candidate):
             return candidate
+
     return None
 
 
@@ -573,11 +676,20 @@ def setup():
     config = load_config().copy()
     errors: List[str] = []
 
+    overrides_text = "\n".join(
+        f"{item['remote']} => {item['local']}" for item in config.get("path_overrides", [])
+    )
+
     if request.method == "POST":
         radarr_url = (request.form.get("radarr_url") or "").strip().rstrip("/")
         api_key = (request.form.get("radarr_api_key") or "").strip()
         raw_paths = request.form.get("file_paths") or ""
         file_paths = normalize_paths(raw_paths)
+        raw_overrides = request.form.get("path_overrides") or ""
+        overrides_text = raw_overrides
+        override_entries, override_errors = parse_path_overrides(raw_overrides)
+        overrides = sanitize_override_entries(override_entries)
+        errors.extend(override_errors)
 
         if not radarr_url:
             errors.append("Radarr URL is required.")
@@ -593,6 +705,7 @@ def setup():
                 "radarr_url": radarr_url,
                 "radarr_api_key": api_key,
                 "file_paths": file_paths,
+                "path_overrides": overrides,
             }
         )
 
@@ -600,7 +713,13 @@ def setup():
             save_config(config)
             return redirect(url_for("index"))
 
-    return render_template("setup.html", config=config, errors=errors, configured=is_configured(config))
+    return render_template(
+        "setup.html",
+        config=config,
+        errors=errors,
+        configured=is_configured(config),
+        overrides_text=overrides_text,
+    )
 
 
 if __name__ == "__main__":
