@@ -7,110 +7,148 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
 </head>
 <body>
-  <div class="container">
+  <div class="app-shell">
     <div class="header">
       <h1>Radarr YouTube Video Importer</h1>
       <a class="link-button" href="{{ url_for('setup') }}">Settings</a>
     </div>
-    <form id="movieForm" novalidate>
-      <div class="form-group">
-        <label for="yturl">YouTube URL</label>
-        <input
-          type="url"
-          id="yturl"
-          name="yturl"
-          placeholder="https://www.youtube.com/watch?v=..."
-          pattern="^(https?:\\/\\/)?(www\\.)?(youtube\\.com|youtu\\.be)\\/.*$"
-          required
-        />
+
+    <div class="page-layout">
+      <div class="main-column">
+        <form id="movieForm" novalidate>
+          <div class="form-group">
+            <label for="yturl">YouTube URL</label>
+            <input
+              type="url"
+              id="yturl"
+              name="yturl"
+              placeholder="https://www.youtube.com/watch?v=..."
+              pattern="^(https?:\\/\\/)?(www\\.)?(youtube\\.com|youtu\\.be)\\/.*$"
+              required
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="movieName">Movie</label>
+            <input
+              list="movieOptions"
+              id="movieName"
+              name="movieName"
+              placeholder="Start typing movie title..."
+              autocomplete="off"
+              required
+            />
+            <datalist id="movieOptions">
+              {% for movie in movies %}
+                <option
+                  data-id="{{ movie['id'] }}"
+                  data-title="{{ movie['title'] }}"
+                  data-year="{{ movie.get('year', '') }}"
+                  data-tmdb="{{ movie.get('tmdbId', '') }}"
+                  value="{{ movie['title'] }}{% if movie.get('year') %} ({{ movie['year'] }}){% endif %}"
+                ></option>
+              {% endfor %}
+            </datalist>
+          </div>
+          <input type="hidden" id="movieId" name="movieId" />
+
+          <div class="form-check">
+            <input type="checkbox" id="extra" name="extra" />
+            <label for="extra">Store in subfolder (treat as extra)</label>
+          </div>
+
+          <div id="extraFields" style="display: none;">
+            <div class="form-group">
+              <label for="extraType">Extra Type</label>
+              <select id="extraType" name="extraType">
+                <option value="trailer" selected>Trailer</option>
+                <option value="behindthescenes">Behind the Scenes</option>
+                <option value="deleted">Deleted Scene</option>
+                <option value="featurette">Featurette</option>
+                <option value="interview">Interview</option>
+                <option value="scene">Scene</option>
+                <option value="short">Short</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="extra_name">Extra Name</label>
+              <input
+                type="text"
+                id="extra_name"
+                name="extra_name"
+                placeholder="e.g., Official Teaser"
+              />
+            </div>
+          </div>
+
+          <details class="advanced-options">
+            <summary>Advanced Options</summary>
+            <div class="advanced-content">
+              <div class="advanced-group">
+                <h3>Download Preferences</h3>
+                <div class="form-group">
+                  <label for="resolution">Resolution Preference</label>
+                  <select id="resolution" name="resolution">
+                    <option value="best" selected>Best Available</option>
+                    <option value="1080p">Up to 1080p</option>
+                    <option value="720p">Up to 720p</option>
+                    <option value="480p">Up to 480p</option>
+                  </select>
+                </div>
+
+                <div class="form-group">
+                  <label for="extension">File Extension</label>
+                  <select id="extension" name="extension">
+                    <option value="mp4" selected>MP4</option>
+                    <option value="mkv">MKV</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="advanced-group">
+                <h3>Movie Metadata Overrides</h3>
+                <p class="help-text">
+                  These values default to the selected Radarr movie. Override them here only if you
+                  need custom metadata for the download.
+                </p>
+                <div class="form-group">
+                  <label for="title">Movie Title</label>
+                  <input type="text" id="title" name="title" placeholder="Movie Title" />
+                </div>
+
+                <div class="form-group">
+                  <label for="year">Year</label>
+                  <input type="text" id="year" name="year" placeholder="e.g., 2010" />
+                </div>
+
+                <div class="form-group">
+                  <label for="tmdb">TMDb ID</label>
+                  <input type="text" id="tmdb" name="tmdb" placeholder="Optional TMDb ID" />
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <button type="submit">Download Video</button>
+        </form>
+
+        <section class="activity-panel" aria-live="polite">
+          <div class="panel-header">
+            <h2>Downloads &amp; Processes</h2>
+          </div>
+          <div id="downloadsList" class="downloads-list empty">
+            <div class="empty-state">No downloads yet.</div>
+          </div>
+        </section>
       </div>
 
-      <div class="form-group">
-        <label for="movieName">Movie</label>
-        <input
-          list="movieOptions"
-          id="movieName"
-          name="movieName"
-          placeholder="Start typing movie title..."
-          autocomplete="off"
-          required
-        />
-        <datalist id="movieOptions">
-          {% for movie in movies %}
-            <option
-              data-id="{{ movie['id'] }}"
-              data-title="{{ movie['title'] }}"
-              data-year="{{ movie.get('year', '') }}"
-              data-tmdb="{{ movie.get('tmdbId', '') }}"
-              value="{{ movie['title'] }}{% if movie.get('year') %} ({{ movie['year'] }}){% endif %}"
-            ></option>
-          {% endfor %}
-        </datalist>
-      </div>
-      <input type="hidden" id="movieId" name="movieId" />
-
-      <div class="form-group">
-        <label for="title">Movie Title</label>
-        <input type="text" id="title" name="title" placeholder="Movie Title" />
-      </div>
-
-      <div class="form-group">
-        <label for="year">Year</label>
-        <input type="text" id="year" name="year" placeholder="e.g., 2010" />
-      </div>
-
-      <div class="form-group">
-        <label for="tmdb">TMDb ID</label>
-        <input type="text" id="tmdb" name="tmdb" placeholder="Optional TMDb ID" />
-      </div>
-
-      <div class="form-group">
-        <label for="extraType">Extra Type</label>
-        <select id="extraType" name="extraType">
-          <option value="trailer" selected>Trailer</option>
-          <option value="behindthescenes">Behind the Scenes</option>
-          <option value="deleted">Deleted Scene</option>
-          <option value="featurette">Featurette</option>
-          <option value="interview">Interview</option>
-          <option value="scene">Scene</option>
-          <option value="short">Short</option>
-          <option value="other">Other</option>
-        </select>
-      </div>
-
-      <div class="form-group">
-        <label for="resolution">Resolution Preference</label>
-        <select id="resolution" name="resolution">
-          <option value="best" selected>Best Available</option>
-          <option value="1080p">Up to 1080p</option>
-          <option value="720p">Up to 720p</option>
-          <option value="480p">Up to 480p</option>
-        </select>
-      </div>
-
-      <div class="form-group">
-        <label for="extension">File Extension</label>
-        <select id="extension" name="extension">
-          <option value="mp4" selected>MP4</option>
-          <option value="mkv">MKV</option>
-        </select>
-      </div>
-
-      <div class="form-check">
-        <input type="checkbox" id="extra" name="extra" />
-        <label for="extra">Store in subfolder (treat as extra)</label>
-      </div>
-
-      <div class="form-group" id="extraNameGroup" style="display: none;">
-        <label for="extra_name">Extra Name</label>
-        <input type="text" id="extra_name" name="extra_name" placeholder="e.g., Official Teaser" />
-      </div>
-
-      <button type="submit">Download Video</button>
-    </form>
-
-    <h2>Debug Console</h2>
-    <div id="console" class="debug-console">Ready.</div>
+      <aside class="side-column">
+        <h2>Debug Console</h2>
+        <div id="console" class="debug-console">Ready.</div>
+      </aside>
+    </div>
   </div>
 
   <script src="{{ url_for('static', filename='script.js') }}" defer></script>
