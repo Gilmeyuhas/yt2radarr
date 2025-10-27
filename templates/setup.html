@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
 </head>
 <body>
-  <div class="container">
+  <div class="app-shell">
     <div class="header">
       <h1>Radarr YouTube Video Importer</h1>
       {% if configured %}
@@ -15,89 +15,103 @@
       {% endif %}
     </div>
 
-    <form method="post" novalidate>
-      <h2>Initial Configuration</h2>
-      <p class="help-text">Provide the details below so the app can connect to Radarr and locate your movie library.</p>
+    <div class="page-layout">
+      <div class="main-column">
+        <form method="post" novalidate>
+          <div class="form-section">
+            <h2>Initial Configuration</h2>
+            <p class="section-description">Provide the Radarr connection details and library locations required for the importer to run.</p>
 
-      {% if errors %}
-        <div class="alerts">
-          {% for error in errors %}
-            <div class="alert">{{ error }}</div>
-          {% endfor %}
+            {% if errors %}
+              <div class="alerts">
+                {% for error in errors %}
+                  <div class="alert">{{ error }}</div>
+                {% endfor %}
+              </div>
+            {% endif %}
+
+            <div class="form-group">
+              <label for="radarr_url">Radarr URL</label>
+              <input
+                type="url"
+                id="radarr_url"
+                name="radarr_url"
+                placeholder="http://localhost:7878"
+                value="{{ config.get('radarr_url', '') }}"
+                required
+              />
+            </div>
+
+            <div class="form-group">
+              <label for="radarr_api_key">Radarr API Key</label>
+              <input
+                type="text"
+                id="radarr_api_key"
+                name="radarr_api_key"
+                placeholder="Paste your Radarr API key"
+                value="{{ config.get('radarr_api_key', '') }}"
+                required
+              />
+            </div>
+          </div>
+
+          <div class="form-section">
+            <h2>Library Locations</h2>
+            <p class="section-description">Add every directory on this machine that already contains movies managed by Radarr.</p>
+
+            <div class="form-group">
+              <label for="file_paths">Movie Library Paths</label>
+              <textarea
+                id="file_paths"
+                name="file_paths"
+                placeholder="One accessible path per line"
+                required
+              >{{- config.get('file_paths', []) | join('\n') -}}</textarea>
+            </div>
+
+            <p class="form-note">The importer scans these folders to avoid downloading duplicates. Use absolute paths such as <code>/mnt/media/movies</code> or <code>C:\\Movies</code>.</p>
+          </div>
+
+          <div class="form-section">
+            <h2>Path Overrides</h2>
+            <p class="section-description">Translate Radarr’s remote paths to the directories available to this importer container or host.</p>
+
+            <div class="form-group">
+              <label for="path_overrides">Overrides</label>
+              <textarea
+                id="path_overrides"
+                name="path_overrides"
+                placeholder="/radarr/media =&gt; /importer/media"
+              >{{- overrides_text -}}</textarea>
+            </div>
+
+            <div class="form-note">
+              <strong>Format:</strong> one mapping per line using <code>radarr/path =&gt; /local/path</code>.
+              Use the path Radarr sees inside its container or pod on the left, and the importer’s mount path on the right.
+              The importer applies overrides before scanning the library directories above.
+            </div>
+          </div>
+
+          <button type="submit">Save Configuration</button>
+        </form>
+      </div>
+
+      <aside class="side-column setup-tips">
+        <div class="info-card">
+          <h2>Need Help Locating Paths?</h2>
+          <p>Open Radarr and inspect a movie’s <em>Media Info</em> tab to copy the path Radarr reports. Verify the same movie exists on this workstation before saving.</p>
         </div>
-      {% endif %}
-
-      <div class="form-group">
-        <label for="radarr_url">Radarr URL</label>
-        <input
-          type="url"
-          id="radarr_url"
-          name="radarr_url"
-          placeholder="http://localhost:7878"
-          value="{{ config.get('radarr_url', '') }}"
-          required
-        />
-      </div>
-
-      <div class="form-group">
-        <label for="radarr_api_key">Radarr API Key</label>
-        <input
-          type="text"
-          id="radarr_api_key"
-          name="radarr_api_key"
-          placeholder="Paste your Radarr API key"
-          value="{{ config.get('radarr_api_key', '') }}"
-          required
-        />
-      </div>
-
-      <div class="form-group">
-        <label for="file_paths">Movie Library Paths</label>
-        <textarea
-          id="file_paths"
-          name="file_paths"
-          placeholder="One accessible path per line"
-          required
-        >{{- config.get('file_paths', []) | join('\n') -}}</textarea>
-      </div>
-      <p class="help-text">
-        List each directory on <strong>this computer</strong> that contains your Radarr-managed movies.
-        The app scans these folders when searching for existing downloads.
-      </p>
-
-      <div class="form-group">
-        <label for="path_overrides">Path Overrides</label>
-        <textarea
-          id="path_overrides"
-          name="path_overrides"
-          placeholder="/mnt/Movies =&gt; /Volumes/Movies"
-        >{{- overrides_text -}}</textarea>
-      </div>
-      <p class="help-text">
-        Use an override when Radarr reports a movie folder that this computer cannot access directly.
-        Overrides translate Radarr's paths to the folders that are available locally.
-      </p>
-      <ul class="help-list">
-        <li><span class="help-label">Radarr path</span>: copy the path exactly as it appears in Radarr, such as <code>/mnt/Movies</code>.</li>
-        <li><span class="help-label">Local path</span>: enter where that library lives on this machine, like <code>/Volumes/Movies</code> or <code>~/Movies</code>.</li>
-        <li>Write one override per line using <code>radarr/path =&gt; /local/path</code>.</li>
-      </ul>
-      <p class="help-text">
-        The app applies overrides first and then falls back to scanning the library paths listed above.
-      </p>
-
-      <div class="form-group">
-        <label for="path_overrides">Path Overrides</label>
-        <textarea
-          id="path_overrides"
-          name="path_overrides"
-          placeholder="/mnt/Movies =&gt; /Volumes/Movies"
-        >{{- overrides_text -}}</textarea>
-      </div>
-      <p class="help-text">Use overrides to map Radarr's movie paths to local directories on this machine. Format each line as <code>radarr/path =&gt; /local/path</code>.</p>
-
-      <button type="submit">Save Configuration</button>
-    </form>
+        <div class="info-card">
+          <h2>Override Examples</h2>
+          <ul>
+            <li><code>/radarr/media =&gt; /importer/media</code> (Radarr container mount vs. importer container mount)</li>
+            <li><code>/config/movies =&gt; /mnt/media/movies</code> (Radarr pod path translated to the host path available here)</li>
+            <li><code>\\NAS\4K =&gt; D:\\Media\4K</code> (Network share mapped to a drive letter)</li>
+          </ul>
+          <p>Leave the overrides field empty if Radarr and this machine see the same file system.</p>
+        </div>
+      </aside>
+    </div>
   </div>
 </body>
 </html>
