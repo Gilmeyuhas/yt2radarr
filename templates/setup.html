@@ -60,7 +60,31 @@
           required
         >{{- config.get('file_paths', []) | join('\n') -}}</textarea>
       </div>
-      <p class="help-text">List each directory that contains your Radarr-managed movies, one per line.</p>
+      <p class="help-text">
+        List each directory on <strong>this computer</strong> that contains your Radarr-managed movies.
+        The app scans these folders when searching for existing downloads.
+      </p>
+
+      <div class="form-group">
+        <label for="path_overrides">Path Overrides</label>
+        <textarea
+          id="path_overrides"
+          name="path_overrides"
+          placeholder="/mnt/Movies =&gt; /Volumes/Movies"
+        >{{- overrides_text -}}</textarea>
+      </div>
+      <p class="help-text">
+        Use an override when Radarr reports a movie folder that this computer cannot access directly.
+        Overrides translate Radarr's paths to the folders that are available locally.
+      </p>
+      <ul class="help-list">
+        <li><span class="help-label">Radarr path</span>: copy the path exactly as it appears in Radarr, such as <code>/mnt/Movies</code>.</li>
+        <li><span class="help-label">Local path</span>: enter where that library lives on this machine, like <code>/Volumes/Movies</code> or <code>~/Movies</code>.</li>
+        <li>Write one override per line using <code>radarr/path =&gt; /local/path</code>.</li>
+      </ul>
+      <p class="help-text">
+        The app applies overrides first and then falls back to scanning the library paths listed above.
+      </p>
 
       <div class="form-group">
         <label for="path_overrides">Path Overrides</label>

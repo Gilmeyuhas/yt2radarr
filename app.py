@@ -604,6 +604,30 @@ def job_detail(job_id: str):
     return jsonify({"job": job})
 
 
+def _apply_path_overrides(original_path: str, overrides: List[Dict[str, str]]) -> Optional[str]:
+    """Return the first override that matches the Radarr path."""
+
+    normalized_original = os.path.normpath(original_path).replace("\\", "/")
+
+    for entry in overrides:
+        remote = os.path.normpath(entry["remote"]).replace("\\", "/")
+        local = entry["local"]
+
+        if normalized_original == remote:
+            candidate = local
+        elif normalized_original.startswith(remote + "/"):
+            remainder = normalized_original[len(remote) + 1 :]
+            candidate = os.path.join(local, remainder)
+        else:
+            continue
+
+        candidate_path = os.path.normpath(candidate)
+        if os.path.isdir(candidate_path):
+            return candidate_path
+
+    return None
+
+
 def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[str]:
     """Resolve a movie folder path using configured library paths."""
 
@@ -639,6 +663,7 @@ def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[s
         candidate = os.path.join(base_path, folder_name)
         if os.path.isdir(candidate):
             return candidate
+
     return None
 
 
