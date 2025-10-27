@@ -16,28 +16,6 @@ app = Flask(__name__)
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 JOBS_PATH = os.path.join(os.path.dirname(__file__), "jobs.json")
 
-
-def chrome_cookie_candidates() -> List[str]:
-    """Return potential Chrome cookie database locations for the current OS."""
-
-    return [
-        "~/.config/google-chrome/Default/Cookies",  # Linux containers / WSL
-        "~/Library/Application Support/Google/Chrome/Default/Cookies",  # macOS
-    ]
-
-
-def chrome_cookie_path() -> Optional[str]:
-    """Return the first Chrome cookie database path that exists."""
-
-    for candidate in chrome_cookie_candidates():
-        expanded = os.path.expanduser(candidate)
-        if os.path.exists(expanded):
-            return expanded
-    return None
-
-
-
-
 def _default_config() -> Dict:
     return {
         "radarr_url": (os.environ.get("RADARR_URL") or "").rstrip("/"),
@@ -423,17 +401,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         title = (payload.get("title") or "").strip()
         year = (payload.get("year") or "").strip()
 
-        cookie_path = chrome_cookie_path()
-        cookie_args = ["--cookies-from-browser", "chrome"] if cookie_path else []
-        if cookie_path:
-            log(f"Using Chrome cookies database at '{cookie_path}'.")
-        else:
-            checked = ", ".join(os.path.expanduser(path) for path in chrome_cookie_candidates())
-            log(
-                "Chrome cookies database not found; checked: "
-                f"{checked or 'no known locations'}. Running yt-dlp without browser cookies."
-            )
-
         resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
         if resolved is None or not str(resolved.get("id")):
             fail("No movie selected. Please choose a movie from the suggestions list.")
@@ -524,8 +491,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 proc = subprocess.run(
                     [
                         "yt-dlp",
-                        "--cookies-from-browser",
-                        "chrome",
                         "--get-title",
                         yt_url,
                     ],
@@ -572,8 +537,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         format_selector = build_format_selector(resolution)
         command = [
             "yt-dlp",
-            "--cookies-from-browser",
-            "chrome",
             "--newline",
             "-f",
             format_selector,

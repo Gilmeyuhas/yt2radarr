@@ -27,6 +27,3 @@ See `Dockerfile` to run in your Docker environment. Mount your Radarr movie libr
 - No secrets stored in the codebase
 - Runs as non-root inside the container
 
----
-
-Built for local use. LAN-only recommended. No authentication layer included (yet).
