@@ -4,7 +4,7 @@ import re
 import subprocess
 import threading
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from flask import Flask, jsonify, redirect, render_template, request, url_for
@@ -22,6 +22,7 @@ def _default_config() -> Dict:
         "radarr_url": (os.environ.get("RADARR_URL") or "").rstrip("/"),
         "radarr_api_key": os.environ.get("RADARR_API_KEY") or "",
         "file_paths": [],
+        "path_overrides": [],
     }
 
 
@@ -46,6 +47,25 @@ def _mark_job_success(job_id: str) -> None:
 
 def _job_status(job_id: str, status: str, progress: Optional[float] = None) -> None:
     jobs_repo.status(job_id, status, progress=progress)
+
+
+def normalize_path_overrides(overrides: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Sanitize and de-duplicate path override entries."""
+
+    normalized: List[Dict[str, str]] = []
+    for entry in overrides:
+        if not isinstance(entry, dict):
+            continue
+        remote = str(entry.get("remote") or "").strip()
+        local = str(entry.get("local") or "").strip()
+        if not remote or not local:
+            continue
+        remote_clean = remote.rstrip("/\\") or remote
+        local_clean = os.path.abspath(os.path.expanduser(local))
+        record = {"remote": remote_clean, "local": local_clean}
+        if record not in normalized:
+            normalized.append(record)
+    return normalized
 
 
 def load_config() -> Dict:
@@ -75,6 +95,11 @@ def load_config() -> Dict:
     if not isinstance(file_paths, list):
         file_paths = [str(file_paths)] if file_paths else []
     config["file_paths"] = [os.path.abspath(os.path.expanduser(str(path))) for path in file_paths]
+
+    overrides_raw = config.get("path_overrides", [])
+    if not isinstance(overrides_raw, list):
+        overrides_raw = []
+    config["path_overrides"] = normalize_path_overrides(overrides_raw)
 
     _config_cache = config
     return config
@@ -110,6 +135,37 @@ def normalize_paths(raw_paths: str) -> List[str]:
         if expanded not in paths:
             paths.append(expanded)
     return paths
+
+
+def parse_path_overrides(raw_overrides: str) -> Tuple[List[Dict[str, str]], List[str]]:
+    """Parse override definitions of the form 'remote => local'."""
+
+    overrides: List[Dict[str, str]] = []
+    errors: List[str] = []
+    for index, line in enumerate(raw_overrides.splitlines(), start=1):
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        separator: Optional[str] = None
+        for candidate in ("=>", "->", ","):
+            if candidate in cleaned:
+                separator = candidate
+                break
+        if separator is None:
+            errors.append(
+                f"Path override line {index} must use 'remote => local' format: {cleaned!r}"
+            )
+            continue
+        remote_raw, local_raw = cleaned.split(separator, 1)
+        remote = remote_raw.strip()
+        local = local_raw.strip()
+        if not remote or not local:
+            errors.append(
+                f"Path override line {index} is missing a remote or local path: {cleaned!r}"
+            )
+            continue
+        overrides.append({"remote": remote, "local": local})
+    return overrides, errors
 
 
 @app.before_request
@@ -557,6 +613,24 @@ def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[s
     if not original_path:
         return None
 
+    normalized_original = os.path.normpath(str(original_path)).replace("\\", "/")
+
+    for override in config.get("path_overrides", []):
+        remote = (override.get("remote") or "").strip()
+        local = (override.get("local") or "").strip()
+        if not remote or not local:
+            continue
+        remote_normalized = os.path.normpath(remote).replace("\\", "/")
+        if normalized_original == remote_normalized:
+            remainder = ""
+        elif normalized_original.startswith(remote_normalized + "/"):
+            remainder = normalized_original[len(remote_normalized) + 1 :]
+        else:
+            continue
+        candidate = os.path.normpath(os.path.join(local, remainder)) if remainder else local
+        if os.path.isdir(candidate):
+            return candidate
+
     folder_name = os.path.basename(original_path.rstrip(os.sep))
     if not folder_name:
         return None
@@ -573,11 +647,20 @@ def setup():
     config = load_config().copy()
     errors: List[str] = []
 
+    overrides_text = "\n".join(
+        f"{item['remote']} => {item['local']}" for item in config.get("path_overrides", [])
+    )
+
     if request.method == "POST":
         radarr_url = (request.form.get("radarr_url") or "").strip().rstrip("/")
         api_key = (request.form.get("radarr_api_key") or "").strip()
         raw_paths = request.form.get("file_paths") or ""
         file_paths = normalize_paths(raw_paths)
+        raw_overrides = request.form.get("path_overrides") or ""
+        overrides_text = raw_overrides
+        override_entries, override_errors = parse_path_overrides(raw_overrides)
+        overrides = normalize_path_overrides(override_entries)
+        errors.extend(override_errors)
 
         if not radarr_url:
             errors.append("Radarr URL is required.")
@@ -593,6 +676,7 @@ def setup():
                 "radarr_url": radarr_url,
                 "radarr_api_key": api_key,
                 "file_paths": file_paths,
+                "path_overrides": overrides,
             }
         )
 
@@ -600,7 +684,13 @@ def setup():
             save_config(config)
             return redirect(url_for("index"))
 
-    return render_template("setup.html", config=config, errors=errors, configured=is_configured(config))
+    return render_template(
+        "setup.html",
+        config=config,
+        errors=errors,
+        configured=is_configured(config),
+        overrides_text=overrides_text,
+    )
 
 
 if __name__ == "__main__":
