@@ -37,6 +37,48 @@ h2 {
   font-size: 1.2em;
 }
 
+.form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #343434;
+  margin-bottom: 24px;
+}
+
+.form-section:last-of-type {
+  border-bottom: none;
+  padding-bottom: 0;
+  margin-bottom: 32px;
+}
+
+.section-description {
+  font-size: 0.95em;
+  color: #c6c6c6;
+  line-height: 1.5;
+  margin: -4px 0 0;
+}
+
+.form-note {
+  font-size: 0.85em;
+  color: #b0b0b0;
+  line-height: 1.6;
+}
+
+.form-note strong {
+  color: #d0d0d0;
+}
+
+.form-note code {
+  display: inline-block;
+  margin: 2px 2px 0;
+  padding: 0 4px;
+  background: #333;
+  border-radius: 3px;
+  color: #f5f5f5;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
 .page-layout {
   display: flex;
   gap: 28px;
@@ -225,11 +267,51 @@ button[type="submit"]:hover {
   border-radius: 4px;
   margin-bottom: 8px;
 }
+
+.info-card {
+  background: #232323;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.info-card h2 {
+  margin: 0;
+  font-size: 1.05em;
+  color: #f0f0f0;
+}
+
+.info-card p {
+  margin: 0;
+  font-size: 0.9em;
+  color: #c4c4c4;
+  line-height: 1.6;
+}
+
+.info-card ul {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.9em;
+  color: #c4c4c4;
+}
+
+.info-card code {
+  background: #333;
+  border-radius: 3px;
+  padding: 0 4px;
+  color: #f5f5f5;
+}
 .help-text {
   font-size: 0.85em;
   color: #b0b0b0;
-  margin-top: -10px;
-  margin-bottom: 15px;
+  margin: 8px 0 16px;
+  line-height: 1.6;
 }
 .help-text code {
   display: inline-block;
