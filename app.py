@@ -4,18 +4,17 @@ import re
 import subprocess
 import threading
 import uuid
-from datetime import datetime
 from typing import Dict, List, Optional
 
 import requests
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
+from jobs import JobRepository
+
 app = Flask(__name__)
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 JOBS_PATH = os.path.join(os.path.dirname(__file__), "jobs.json")
-
-MAX_STORED_JOBS = 50
 
 
 def _default_config() -> Dict:
@@ -30,161 +29,23 @@ _config_cache: Optional[Dict] = None
 
 _movies_cache: Optional[List[Dict]] = None
 
-_jobs_cache: Optional[List[Dict]] = None
-
-_jobs_lock = threading.Lock()
-
-
-def _now_iso() -> str:
-    return datetime.utcnow().isoformat() + "Z"
-
-
-def _ensure_jobs_loaded() -> None:
-    global _jobs_cache
-    if _jobs_cache is not None:
-        return
-    try:
-        with open(JOBS_PATH, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-            if isinstance(data, list):
-                _jobs_cache = data
-            else:
-                _jobs_cache = []
-    except FileNotFoundError:
-        _jobs_cache = []
-    except Exception as exc:  # pragma: no cover - history file errors
-        print(f"Failed to load jobs history: {exc}")
-        _jobs_cache = []
-
-
-def _persist_jobs_locked() -> None:
-    os.makedirs(os.path.dirname(JOBS_PATH) or ".", exist_ok=True)
-    with open(JOBS_PATH, "w", encoding="utf-8") as handle:
-        json.dump(_jobs_cache or [], handle, indent=2)
-
-
-def _serialize_job(job: Dict, include_logs: bool = False) -> Dict:
-    payload = {
-        "id": job.get("id"),
-        "status": job.get("status"),
-        "progress": job.get("progress", 0),
-        "label": job.get("label"),
-        "subtitle": job.get("subtitle"),
-        "metadata": job.get("metadata", []),
-        "message": job.get("message"),
-        "created_at": job.get("created_at"),
-        "started_at": job.get("started_at"),
-        "updated_at": job.get("updated_at"),
-        "completed_at": job.get("completed_at"),
-    }
-    if include_logs:
-        payload["logs"] = job.get("logs", [])
-    return payload
-
-
-def list_jobs(include_logs: bool = False) -> List[Dict]:
-    with _jobs_lock:
-        _ensure_jobs_loaded()
-        jobs = list(_jobs_cache or [])
-    jobs.sort(key=lambda item: item.get("created_at") or "", reverse=True)
-    return [_serialize_job(job, include_logs=include_logs) for job in jobs]
-
-
-def get_job(job_id: str) -> Optional[Dict]:
-    with _jobs_lock:
-        _ensure_jobs_loaded()
-        for job in _jobs_cache or []:
-            if job.get("id") == job_id:
-                return job
-    return None
-
-
-def _update_job(job_id: str, updates: Dict) -> Optional[Dict]:
-    with _jobs_lock:
-        _ensure_jobs_loaded()
-        if not _jobs_cache:
-            return None
-        for index, job in enumerate(_jobs_cache):
-            if job.get("id") != job_id:
-                continue
-            current_progress = float(job.get("progress") or 0.0)
-            if "progress" in updates:
-                try:
-                    new_progress = float(updates["progress"])
-                except (TypeError, ValueError):
-                    new_progress = current_progress
-                updates["progress"] = max(current_progress, min(100.0, max(0.0, new_progress)))
-            job.update(updates)
-            job["updated_at"] = _now_iso()
-            _jobs_cache[index] = job
-            _jobs_cache[:] = _jobs_cache[:MAX_STORED_JOBS]
-            _persist_jobs_locked()
-            return job
-    return None
+jobs_repo = JobRepository(JOBS_PATH, max_items=50)
 
 
 def append_job_log(job_id: str, message: str) -> None:
-    with _jobs_lock:
-        _ensure_jobs_loaded()
-        if not _jobs_cache:
-            return
-        for index, job in enumerate(_jobs_cache):
-            if job.get("id") != job_id:
-                continue
-            logs = job.setdefault("logs", [])
-            logs.append(str(message))
-            if len(logs) > 200:
-                job["logs"] = logs[-200:]
-            job["updated_at"] = _now_iso()
-            _jobs_cache[index] = job
-            _persist_jobs_locked()
-            return
-
-
-def record_job(job: Dict) -> Dict:
-    global _jobs_cache
-    with _jobs_lock:
-        _ensure_jobs_loaded()
-        cache = _jobs_cache or []
-        cache.insert(0, job)
-        _jobs_cache = cache[:MAX_STORED_JOBS]
-        _persist_jobs_locked()
-    return job
+    jobs_repo.append_logs(job_id, [message])
 
 
 def _mark_job_failure(job_id: str, message: str) -> None:
-    _update_job(
-        job_id,
-        {
-            "status": "failed",
-            "message": message,
-            "progress": 100,
-            "completed_at": _now_iso(),
-        },
-    )
+    jobs_repo.mark_failure(job_id, message)
 
 
 def _mark_job_success(job_id: str) -> None:
-    _update_job(
-        job_id,
-        {
-            "status": "complete",
-            "message": "",
-            "progress": 100,
-            "completed_at": _now_iso(),
-        },
-    )
+    jobs_repo.mark_success(job_id)
 
 
 def _job_status(job_id: str, status: str, progress: Optional[float] = None) -> None:
-    updates: Dict = {"status": status}
-    if progress is not None:
-        updates["progress"] = progress
-    if status == "processing":
-        job = get_job(job_id)
-        if job and not job.get("started_at"):
-            updates["started_at"] = _now_iso()
-    _update_job(job_id, updates)
+    jobs_repo.status(job_id, status, progress=progress)
 
 
 def load_config() -> Dict:
@@ -441,29 +302,24 @@ def create():
 
     descriptors = _describe_job(payload)
     job_id = str(uuid.uuid4())
-    timestamp = _now_iso()
-    job_record = {
-        "id": job_id,
-        "status": "queued",
-        "progress": 0,
-        "label": descriptors["label"],
-        "subtitle": descriptors["subtitle"],
-        "metadata": descriptors["metadata"],
-        "message": "",
-        "logs": ["Job queued."],
-        "created_at": timestamp,
-        "started_at": None,
-        "updated_at": timestamp,
-        "completed_at": None,
-        "request": payload,
-    }
-
-    record_job(job_record)
+    job_record = jobs_repo.create(
+        {
+            "id": job_id,
+            "status": "queued",
+            "progress": 0,
+            "label": descriptors["label"],
+            "subtitle": descriptors["subtitle"],
+            "metadata": descriptors["metadata"],
+            "message": "",
+            "logs": ["Job queued."],
+            "request": payload,
+        }
+    )
 
     worker = threading.Thread(target=process_download_job, args=(job_id, payload), daemon=True)
     worker.start()
 
-    return jsonify({"job": _serialize_job(job_record, include_logs=True)}), 202
+    return jsonify({"job": job_record}), 202
 
 
 def process_download_job(job_id: str, payload: Dict) -> None:
@@ -513,7 +369,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         payload["extraType"] = extra_type
 
         descriptors = _describe_job(payload)
-        _update_job(
+        jobs_repo.update(
             job_id,
             {
                 "label": descriptors["label"],
@@ -681,15 +537,15 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
 @app.route("/jobs", methods=["GET"])
 def jobs_index():
-    return jsonify({"jobs": list_jobs()})
+    return jsonify({"jobs": jobs_repo.list()})
 
 
 @app.route("/jobs/<job_id>", methods=["GET"])
 def job_detail(job_id: str):
-    job = get_job(job_id)
+    job = jobs_repo.get(job_id, include_logs=True)
     if job is None:
         return jsonify({"error": "Job not found."}), 404
-    return jsonify({"job": _serialize_job(job, include_logs=True)})
+    return jsonify({"job": job})
 
 
 def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[str]:
