@@ -267,7 +267,7 @@ def create():
     yt_url = (data.get("yturl") or "").strip()
     if not yt_url:
         error("YouTube URL is required.")
-    elif not re.search(r"(youtube\\.com|youtu\\.be)/", yt_url):
+    elif not re.search(r"(youtube\.com|youtu\.be)/", yt_url):
         error("Please provide a valid YouTube URL.")
 
     movie_id = (data.get("movieId") or "").strip()
