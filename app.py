@@ -2,14 +2,19 @@ import json
 import os
 import re
 import subprocess
+import threading
+import uuid
 from typing import Dict, List, Optional
 
 import requests
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
+from jobs import JobRepository
+
 app = Flask(__name__)
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+JOBS_PATH = os.path.join(os.path.dirname(__file__), "jobs.json")
 
 
 def _default_config() -> Dict:
@@ -23,6 +28,24 @@ def _default_config() -> Dict:
 _config_cache: Optional[Dict] = None
 
 _movies_cache: Optional[List[Dict]] = None
+
+jobs_repo = JobRepository(JOBS_PATH, max_items=50)
+
+
+def append_job_log(job_id: str, message: str) -> None:
+    jobs_repo.append_logs(job_id, [message])
+
+
+def _mark_job_failure(job_id: str, message: str) -> None:
+    jobs_repo.mark_failure(job_id, message)
+
+
+def _mark_job_success(job_id: str) -> None:
+    jobs_repo.mark_success(job_id)
+
+
+def _job_status(job_id: str, status: str, progress: Optional[float] = None) -> None:
+    jobs_repo.status(job_id, status, progress=progress)
 
 
 def load_config() -> Dict:
@@ -176,6 +199,50 @@ def resolve_movie_by_metadata(
     return None
 
 
+EXTRA_TYPE_LABELS = {
+    "trailer": "Trailer",
+    "behindthescenes": "Behind the Scenes",
+    "deleted": "Deleted Scene",
+    "featurette": "Featurette",
+    "interview": "Interview",
+    "scene": "Scene",
+    "short": "Short",
+    "other": "Other",
+}
+
+
+RESOLUTION_LABELS = {
+    "best": "Best Available",
+    "1080p": "Up to 1080p",
+    "720p": "Up to 720p",
+    "480p": "Up to 480p",
+}
+
+
+def _describe_job(payload: Dict) -> Dict:
+    movie_label = (payload.get("movieName") or payload.get("title") or "").strip()
+    if not movie_label:
+        movie_label = "Selected Movie"
+    extra = bool(payload.get("extra"))
+    extra_type = (payload.get("extraType") or "trailer").strip().lower()
+    extra_name = (payload.get("extra_name") or "").strip()
+    extra_label = extra_name or EXTRA_TYPE_LABELS.get(extra_type, extra_type.capitalize())
+    if extra and extra_label:
+        label = f"{movie_label} – {extra_label}"
+        subtitle = f"Extra • {extra_label}"
+    else:
+        label = movie_label
+        subtitle = ""
+    resolution = (payload.get("resolution") or "best").strip().lower()
+    metadata = [
+        "Stored as extra content" if extra else "",
+        f"Format: {(payload.get('extension') or 'mp4').strip().upper() or 'MP4'}",
+        f"Resolution: {RESOLUTION_LABELS.get(resolution, resolution or 'Best Available')}",
+    ]
+    metadata = [item for item in metadata if item]
+    return {"label": label or "Radarr Download", "subtitle": subtitle, "metadata": metadata}
+
+
 @app.route("/", methods=["GET"])
 def index():
     movies = get_all_movies()
@@ -193,9 +260,6 @@ def create():
     logs: List[str] = []
     errors: List[str] = []
 
-    def log(message: str) -> None:
-        logs.append(message)
-
     def error(message: str) -> None:
         logs.append(f"ERROR: {message}")
         errors.append(message)
@@ -207,167 +271,281 @@ def create():
         error("Please provide a valid YouTube URL.")
 
     movie_id = (data.get("movieId") or "").strip()
-    tmdb = (data.get("tmdb") or "").strip()
-    title = (data.get("title") or "").strip()
-    year = (data.get("year") or "").strip()
-
-    resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
-    if resolved is None or not str(resolved.get("id")):
+    if not movie_id:
         error("No movie selected. Please choose a movie from the suggestions list.")
-        return jsonify({"logs": logs}), 400
-    movie_id = str(resolved.get("id"))
-
-    extra_type = (data.get("extraType") or "trailer").strip().lower()
-    allowed_extra_types = {
-        "trailer",
-        "behindthescenes",
-        "deleted",
-        "featurette",
-        "interview",
-        "scene",
-        "short",
-        "other",
-    }
-    if extra_type not in allowed_extra_types:
-        log(f"Unknown extra type '{extra_type}', defaulting to 'other'.")
-        extra_type = "other"
 
     extra = bool(data.get("extra"))
     extra_name = (data.get("extra_name") or "").strip()
-    resolution = (data.get("resolution") or "best").strip().lower()
-    extension = (data.get("extension") or "mp4").strip().lower()
-
     if extra and not extra_name:
         error("Extra name is required when storing in a subfolder.")
+
+    extension = (data.get("extension") or "mp4").strip().lower()
     if extension not in {"mp4", "mkv"}:
         error(f"Unsupported file extension '{extension}'.")
 
     if errors:
         return jsonify({"logs": logs}), 400
 
-    try:
-        log(f"Fetching Radarr details for movie ID {movie_id}.")
-        response = requests.get(
-            f"{config['radarr_url']}/api/v3/movie/{movie_id}",
-            headers={"X-Api-Key": config["radarr_api_key"]},
-            timeout=10,
-        )
-        response.raise_for_status()
-        movie = response.json()
-    except Exception as exc:  # pragma: no cover - network errors
-        error(f"Could not retrieve movie info from Radarr (ID {movie_id}): {exc}")
-        return jsonify({"logs": logs}), 502
-
-    movie_path = movie.get("path")
-    resolved_path = resolve_movie_path(movie_path, config)
-    if resolved_path is None:
-        error(f"Movie folder not found on disk: {movie_path}")
-        return jsonify({"logs": logs}), 400
-
-    movie_path = resolved_path
-    log(f"Movie path resolved to '{movie_path}'.")
-
-    folder_map = {
-        "trailer": "Trailers",
-        "behindthescenes": "Behind The Scenes",
-        "deleted": "Deleted Scenes",
-        "featurette": "Featurettes",
-        "interview": "Interviews",
-        "scene": "Scenes",
-        "short": "Shorts",
-        "other": "Other",
+    payload = {
+        "yturl": yt_url,
+        "movieId": movie_id,
+        "movieName": (data.get("movieName") or "").strip(),
+        "title": (data.get("title") or "").strip(),
+        "year": (data.get("year") or "").strip(),
+        "tmdb": (data.get("tmdb") or "").strip(),
+        "resolution": (data.get("resolution") or "best").strip().lower(),
+        "extension": extension,
+        "extra": extra,
+        "extraType": (data.get("extraType") or "trailer").strip().lower(),
+        "extra_name": extra_name,
     }
 
-    target_dir = movie_path
-    if extra:
-        subfolder = folder_map.get(extra_type, extra_type.capitalize() + "s")
-        target_dir = os.path.join(movie_path, subfolder)
-        os.makedirs(target_dir, exist_ok=True)
-        log(f"Storing video in subfolder '{subfolder}'.")
-    else:
-        log("Storing video alongside primary movie files.")
+    descriptors = _describe_job(payload)
+    job_id = str(uuid.uuid4())
+    job_record = jobs_repo.create(
+        {
+            "id": job_id,
+            "status": "queued",
+            "progress": 0,
+            "label": descriptors["label"],
+            "subtitle": descriptors["subtitle"],
+            "metadata": descriptors["metadata"],
+            "message": "",
+            "logs": ["Job queued."],
+            "request": payload,
+        }
+    )
 
-    descriptive = extra_name
-    if descriptive:
-        log(f"Using custom descriptive name '{descriptive}'.")
-    else:
-        try:
-            log("Querying yt-dlp for video title.")
-            proc = subprocess.run(
-                ["yt-dlp", "--get-title", yt_url],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            descriptive = proc.stdout.strip() or "Video"
-            log(f"Using YouTube title '{descriptive}'.")
-        except Exception as exc:  # pragma: no cover - command failure
-            descriptive = "Video"
-            logs.append(
-                f"WARNING: Failed to retrieve title from yt-dlp ({exc}). Using fallback name 'Video'."
-            )
+    worker = threading.Thread(target=process_download_job, args=(job_id, payload), daemon=True)
+    worker.start()
 
-    descriptive = sanitize_filename(descriptive)
+    return jsonify({"job": job_record}), 202
 
-    if extra:
-        filename = f"{descriptive}.{extension}"
-    else:
-        filename = f"{descriptive}-{extra_type}.{extension}"
 
-    target_path = os.path.join(target_dir, filename)
-    if os.path.exists(target_path):
-        base_name, ext_part = os.path.splitext(filename)
-        log(f"File '{filename}' already exists. Searching for a free filename.")
-        index = 1
-        while True:
-            if extra:
-                new_filename = f"{base_name} ({index}){ext_part}"
-            else:
-                if base_name.endswith(f"-{extra_type}"):
-                    base_descr = base_name[: -len(f"-{extra_type}")]
-                else:
-                    base_descr = base_name
-                new_filename = f"{base_descr} ({index})-{extra_type}{ext_part}"
-            candidate = os.path.join(target_dir, new_filename)
-            if not os.path.exists(candidate):
-                target_path = candidate
-                log(f"Selected new filename '{new_filename}'.")
-                break
-            index += 1
+def process_download_job(job_id: str, payload: Dict) -> None:
+    def log(message: str) -> None:
+        append_job_log(job_id, message)
 
-    format_selector = build_format_selector(resolution)
-    command = [
-        "yt-dlp",
-        "-f",
-        format_selector,
-        "--merge-output-format",
-        extension,
-        "-o",
-        target_path,
-        yt_url,
-    ]
+    def warn(message: str) -> None:
+        append_job_log(job_id, f"WARNING: {message}")
 
-    log(f"Running yt-dlp with format '{format_selector}'.")
+    def fail(message: str) -> None:
+        append_job_log(job_id, f"ERROR: {message}")
+        _mark_job_failure(job_id, message)
+
     try:
-        result = subprocess.run(command, capture_output=True, text=True)
-    except Exception as exc:  # pragma: no cover - command failure
-        error(f"Failed to invoke yt-dlp: {exc}")
-        return jsonify({"logs": logs}), 500
+        _job_status(job_id, "processing", progress=1)
+        config = load_config()
+        if not is_configured(config):
+            fail("Application has not been configured yet.")
+            return
 
-    if result.returncode != 0:
-        error_output = (result.stderr or result.stdout or "").strip()
-        error(f"Download failed: {error_output[:300]}")
-        return jsonify({"logs": logs}), 500
+        yt_url = (payload.get("yturl") or "").strip()
+        movie_id = (payload.get("movieId") or "").strip()
+        tmdb = (payload.get("tmdb") or "").strip()
+        title = (payload.get("title") or "").strip()
+        year = (payload.get("year") or "").strip()
 
-    if result.stdout:
-        for line in result.stdout.strip().splitlines():
+        resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
+        if resolved is None or not str(resolved.get("id")):
+            fail("No movie selected. Please choose a movie from the suggestions list.")
+            return
+        movie_id = str(resolved.get("id"))
+
+        extra_type = (payload.get("extraType") or "trailer").strip().lower()
+        allowed_extra_types = {
+            "trailer",
+            "behindthescenes",
+            "deleted",
+            "featurette",
+            "interview",
+            "scene",
+            "short",
+            "other",
+        }
+        if extra_type not in allowed_extra_types:
+            log(f"Unknown extra type '{extra_type}', defaulting to 'other'.")
+            extra_type = "other"
+        payload["extraType"] = extra_type
+
+        descriptors = _describe_job(payload)
+        jobs_repo.update(
+            job_id,
+            {
+                "label": descriptors["label"],
+                "subtitle": descriptors["subtitle"],
+                "metadata": descriptors["metadata"],
+                "request": payload,
+            },
+        )
+
+        extra = bool(payload.get("extra"))
+        extra_name = (payload.get("extra_name") or "").strip()
+        resolution = (payload.get("resolution") or "best").strip().lower()
+        extension = (payload.get("extension") or "mp4").strip().lower()
+
+        try:
+            log(f"Fetching Radarr details for movie ID {movie_id}.")
+            response = requests.get(
+                f"{config['radarr_url']}/api/v3/movie/{movie_id}",
+                headers={"X-Api-Key": config["radarr_api_key"]},
+                timeout=10,
+            )
+            response.raise_for_status()
+            movie = response.json()
+        except Exception as exc:  # pragma: no cover - network errors
+            fail(f"Could not retrieve movie info from Radarr (ID {movie_id}): {exc}")
+            return
+
+        movie_path = movie.get("path")
+        resolved_path = resolve_movie_path(movie_path, config)
+        if resolved_path is None:
+            fail(f"Movie folder not found on disk: {movie_path}")
+            return
+
+        movie_path = resolved_path
+        log(f"Movie path resolved to '{movie_path}'.")
+        _job_status(job_id, "processing", progress=10)
+
+        folder_map = {
+            "trailer": "Trailers",
+            "behindthescenes": "Behind The Scenes",
+            "deleted": "Deleted Scenes",
+            "featurette": "Featurettes",
+            "interview": "Interviews",
+            "scene": "Scenes",
+            "short": "Shorts",
+            "other": "Other",
+        }
+
+        target_dir = movie_path
+        if extra:
+            subfolder = folder_map.get(extra_type, extra_type.capitalize() + "s")
+            target_dir = os.path.join(movie_path, subfolder)
+            os.makedirs(target_dir, exist_ok=True)
+            log(f"Storing video in subfolder '{subfolder}'.")
+        else:
+            log("Storing video alongside primary movie files.")
+
+        descriptive = extra_name
+        if descriptive:
+            log(f"Using custom descriptive name '{descriptive}'.")
+        else:
+            try:
+                log("Querying yt-dlp for video title.")
+                proc = subprocess.run(
+                    ["yt-dlp", "--get-title", yt_url],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                descriptive = proc.stdout.strip() or "Video"
+                log(f"Using YouTube title '{descriptive}'.")
+            except Exception as exc:  # pragma: no cover - command failure
+                descriptive = "Video"
+                warn(
+                    f"Failed to retrieve title from yt-dlp ({exc}). Using fallback name 'Video'."
+                )
+
+        descriptive = sanitize_filename(descriptive)
+
+        if extra:
+            filename = f"{descriptive}.{extension}"
+        else:
+            filename = f"{descriptive}-{extra_type}.{extension}"
+
+        target_path = os.path.join(target_dir, filename)
+        if os.path.exists(target_path):
+            base_name, ext_part = os.path.splitext(filename)
+            log(f"File '{filename}' already exists. Searching for a free filename.")
+            index = 1
+            while True:
+                if extra:
+                    new_filename = f"{base_name} ({index}){ext_part}"
+                else:
+                    if base_name.endswith(f"-{extra_type}"):
+                        base_descr = base_name[: -len(f"-{extra_type}")]
+                    else:
+                        base_descr = base_name
+                    new_filename = f"{base_descr} ({index})-{extra_type}{ext_part}"
+                candidate = os.path.join(target_dir, new_filename)
+                if not os.path.exists(candidate):
+                    target_path = candidate
+                    log(f"Selected new filename '{new_filename}'.")
+                    break
+                index += 1
+
+        format_selector = build_format_selector(resolution)
+        command = [
+            "yt-dlp",
+            "--newline",
+            "-f",
+            format_selector,
+            "--merge-output-format",
+            extension,
+            "-o",
+            target_path,
+            yt_url,
+        ]
+
+        log(f"Running yt-dlp with format '{format_selector}'.")
+        _job_status(job_id, "processing", progress=20)
+
+        output_lines: List[str] = []
+        progress_pattern = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except Exception as exc:  # pragma: no cover - command failure
+            fail(f"Failed to invoke yt-dlp: {exc}")
+            return
+
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            output_lines.append(line)
             log(line)
-    if result.stderr:
-        for line in result.stderr.strip().splitlines():
-            logs.append(f"WARNING: {line}")
+            match = progress_pattern.search(line)
+            if match:
+                try:
+                    progress_value = float(match.group(1))
+                except (TypeError, ValueError):
+                    continue
+                _job_status(job_id, "processing", progress=progress_value)
 
-    log(f"Success! Video downloaded to '{target_path}'.")
-    return jsonify({"logs": logs}), 200
+        process.stdout.close()
+        return_code = process.wait()
+
+        if return_code != 0:
+            summary = output_lines[-1] if output_lines else "Download failed."
+            fail(f"Download failed: {summary[:300]}")
+            return
+
+        _job_status(job_id, "processing", progress=100)
+        log(f"Success! Video downloaded to '{target_path}'.")
+        _mark_job_success(job_id)
+    except Exception as exc:  # pragma: no cover - unexpected failure
+        fail(f"Unexpected error: {exc}")
+
+
+@app.route("/jobs", methods=["GET"])
+def jobs_index():
+    return jsonify({"jobs": jobs_repo.list()})
+
+
+@app.route("/jobs/<job_id>", methods=["GET"])
+def job_detail(job_id: str):
+    job = jobs_repo.get(job_id, include_logs=True)
+    if job is None:
+        return jsonify({"error": "Job not found."}), 404
+    return jsonify({"job": job})
 
 
 def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[str]:

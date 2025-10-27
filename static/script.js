@@ -52,7 +52,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     const lineElem = document.createElement('div');
     if (isError) {
-      lineElem.classList.add('error-line');
+      line.classList.add('error-line');
     }
     lineElem.textContent = text;
     consoleDiv.appendChild(lineElem);
@@ -65,7 +65,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     consoleDiv.innerHTML = '';
     if (message) {
-      appendConsoleLine(message, false);
+      appendConsoleLine(message);
     }
   }
 
@@ -302,47 +302,81 @@ document.addEventListener('DOMContentLoaded', () => {
       extraNameInput.value = '';
       extraTypeSelect.value = 'trailer';
     }
+    state.pollers.delete(jobId);
   }
 
-  extraCheckbox.addEventListener('change', updateExtraVisibility);
+  function normaliseJob(job) {
+    if (!job || !job.id) {
+      return null;
+    }
+    let status = job.status || 'queued';
+    if (status === 'completed') {
+      status = 'complete';
+    }
+    if (!STATUS_LABELS[status]) {
+      status = 'queued';
+    }
+    const startedAt = parseDate(job.started_at || job.created_at) || new Date();
+    const updatedAt = parseDate(job.updated_at || job.started_at || job.created_at) || new Date();
+    const progress = typeof job.progress === 'number' ? Math.max(0, Math.min(100, job.progress)) : 0;
+    return {
+      id: job.id,
+      label: job.label || 'Radarr Download',
+      status,
+      progress,
+      metadata: Array.isArray(job.metadata) ? job.metadata : [],
+      subtitle: job.subtitle || '',
+      message: job.message || '',
+      startedAt,
+      updatedAt,
+    };
+  }
 
   movieNameInput.addEventListener('input', () => {
     const inputVal = movieNameInput.value;
     let matched = false;
-    for (let i = 0; i < movieOptions.options.length; i += 1) {
-      const option = movieOptions.options[i];
+    for (let i = 0; i < elements.movieOptions.options.length; i += 1) {
+      const option = elements.movieOptions.options[i];
       if (option.value === inputVal) {
         matched = true;
-        movieIdInput.value = option.getAttribute('data-id') || '';
-        titleInput.value = option.getAttribute('data-title') || '';
-        yearInput.value = option.getAttribute('data-year') || '';
-        tmdbInput.value = option.getAttribute('data-tmdb') || '';
+        if (elements.movieIdInput) {
+          elements.movieIdInput.value = option.getAttribute('data-id') || '';
+        }
+        if (elements.titleInput) {
+          elements.titleInput.value = option.getAttribute('data-title') || '';
+        }
+        if (elements.yearInput) {
+          elements.yearInput.value = option.getAttribute('data-year') || '';
+        }
+        if (elements.tmdbInput) {
+          elements.tmdbInput.value = option.getAttribute('data-tmdb') || '';
+        }
         break;
       }
     }
     if (!matched) {
-      movieIdInput.value = '';
-      titleInput.value = '';
-      yearInput.value = '';
-      tmdbInput.value = '';
+      if (elements.movieIdInput) elements.movieIdInput.value = '';
+      if (elements.titleInput) elements.titleInput.value = '';
+      if (elements.yearInput) elements.yearInput.value = '';
+      if (elements.tmdbInput) elements.tmdbInput.value = '';
     }
-  });
+  }
 
   form.addEventListener('submit', event => {
     event.preventDefault();
 
     const payload = {
-      yturl: ytInput.value.trim(),
-      movieName: movieNameInput.value.trim(),
-      movieId: movieIdInput.value.trim(),
-      title: titleInput.value.trim(),
-      year: yearInput.value.trim(),
-      tmdb: tmdbInput.value.trim(),
-      resolution: resSelect.value,
-      extension: extSelect.value,
-      extra: extraCheckbox.checked,
-      extraType: extraTypeSelect.value,
-      extra_name: extraNameInput.value.trim()
+      yturl: elements.ytInput ? elements.ytInput.value.trim() : '',
+      movieName: elements.movieNameInput ? elements.movieNameInput.value.trim() : '',
+      movieId: elements.movieIdInput ? elements.movieIdInput.value.trim() : '',
+      title: elements.titleInput ? elements.titleInput.value.trim() : '',
+      year: elements.yearInput ? elements.yearInput.value.trim() : '',
+      tmdb: elements.tmdbInput ? elements.tmdbInput.value.trim() : '',
+      resolution: elements.resolutionSelect ? elements.resolutionSelect.value : 'best',
+      extension: elements.extensionSelect ? elements.extensionSelect.value : 'mp4',
+      extra: elements.extraCheckbox ? elements.extraCheckbox.checked : false,
+      extraType: elements.extraTypeSelect ? elements.extraTypeSelect.value : 'trailer',
+      extra_name: elements.extraNameInput ? elements.extraNameInput.value.trim() : '',
     };
 
     resetConsole('Submitting request...');
@@ -411,8 +445,32 @@ document.addEventListener('DOMContentLoaded', () => {
           completeDownload(entryId, 'failed', message);
         }
       });
+
+      const job = data && data.job ? data.job : null;
+      if (!job || !job.id) {
+        appendConsoleLine('ERROR: No job information returned.', true);
+        return;
+      }
+
+      state.selectedJobId = job.id;
+      renderDownloads();
+      renderLogLines(job.logs || []);
+
+      const entry = normaliseJob(job);
+      if (entry) {
+        upsertDownload(entry);
+      }
+      beginJobPolling(job.id, { showConsole: true });
+    } catch (err) {
+      if (err && err.response && Array.isArray(err.response.logs)) {
+        renderLogLines(err.response.logs);
+      } else {
+        appendConsoleLine(`ERROR: ${err && err.message ? err.message : err}`, true);
+      }
+    }
   });
 
   updateExtraVisibility();
   renderDownloads();
 });
+
