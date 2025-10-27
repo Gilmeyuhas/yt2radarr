@@ -240,23 +240,6 @@ button[type="submit"]:hover {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
-.help-list {
-  font-size: 0.85em;
-  color: #b0b0b0;
-  margin: -6px 0 14px 22px;
-  padding: 0;
-  list-style: disc;
-}
-
-.help-list li {
-  margin-bottom: 6px;
-}
-
-.help-label {
-  font-weight: 600;
-  color: #d8d8d8;
-}
-
 .activity-panel {
   background: #2a2a2a;
   border: 1px solid #3a3a3a;

@@ -86,6 +86,16 @@
         The app applies overrides first and then falls back to scanning the library paths listed above.
       </p>
 
+      <div class="form-group">
+        <label for="path_overrides">Path Overrides</label>
+        <textarea
+          id="path_overrides"
+          name="path_overrides"
+          placeholder="/mnt/Movies =&gt; /Volumes/Movies"
+        >{{- overrides_text -}}</textarea>
+      </div>
+      <p class="help-text">Use overrides to map Radarr's movie paths to local directories on this machine. Format each line as <code>radarr/path =&gt; /local/path</code>.</p>
+
       <button type="submit">Save Configuration</button>
     </form>
   </div>

@@ -49,38 +49,23 @@ def _job_status(job_id: str, status: str, progress: Optional[float] = None) -> N
     jobs_repo.status(job_id, status, progress=progress)
 
 
-def _clean_override_entry(remote: str, local: str) -> Optional[Dict[str, str]]:
-    """Return a normalized override entry or None when invalid."""
+def normalize_path_overrides(overrides: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Sanitize and de-duplicate path override entries."""
 
-    remote = (remote or "").strip()
-    local = (local or "").strip()
-    if not remote or not local:
-        return None
-
-    remote_path = remote.rstrip("/\\") or remote
-    local_path = os.path.abspath(os.path.expanduser(local))
-    return {"remote": remote_path, "local": local_path}
-
-
-def sanitize_override_entries(overrides: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Validate existing override entries that came from disk."""
-
-    cleaned: List[Dict[str, str]] = []
-    seen: set = set()
-
+    normalized: List[Dict[str, str]] = []
     for entry in overrides:
         if not isinstance(entry, dict):
             continue
-        candidate = _clean_override_entry(entry.get("remote", ""), entry.get("local", ""))
-        if not candidate:
+        remote = str(entry.get("remote") or "").strip()
+        local = str(entry.get("local") or "").strip()
+        if not remote or not local:
             continue
-        marker = (candidate["remote"], candidate["local"])
-        if marker in seen:
-            continue
-        seen.add(marker)
-        cleaned.append(candidate)
-
-    return cleaned
+        remote_clean = remote.rstrip("/\\") or remote
+        local_clean = os.path.abspath(os.path.expanduser(local))
+        record = {"remote": remote_clean, "local": local_clean}
+        if record not in normalized:
+            normalized.append(record)
+    return normalized
 
 
 def load_config() -> Dict:
@@ -114,7 +99,7 @@ def load_config() -> Dict:
     overrides_raw = config.get("path_overrides", [])
     if not isinstance(overrides_raw, list):
         overrides_raw = []
-    config["path_overrides"] = sanitize_override_entries(overrides_raw)
+    config["path_overrides"] = normalize_path_overrides(overrides_raw)
 
     _config_cache = config
     return config
@@ -153,34 +138,33 @@ def normalize_paths(raw_paths: str) -> List[str]:
 
 
 def parse_path_overrides(raw_overrides: str) -> Tuple[List[Dict[str, str]], List[str]]:
-    """Parse overrides entered in the setup form."""
+    """Parse override definitions of the form 'remote => local'."""
 
     overrides: List[Dict[str, str]] = []
     errors: List[str] = []
-    seen: set = set()
-
     for index, line in enumerate(raw_overrides.splitlines(), start=1):
         cleaned = line.strip()
         if not cleaned:
             continue
-        if "=>" not in cleaned:
+        separator: Optional[str] = None
+        for candidate in ("=>", "->", ","):
+            if candidate in cleaned:
+                separator = candidate
+                break
+        if separator is None:
             errors.append(
-                f"Line {index} must use the 'radarr/path => /local/path' format: {cleaned!r}"
+                f"Path override line {index} must use 'remote => local' format: {cleaned!r}"
             )
             continue
-        remote_raw, local_raw = cleaned.split("=>", 1)
-        entry = _clean_override_entry(remote_raw, local_raw)
-        if not entry:
+        remote_raw, local_raw = cleaned.split(separator, 1)
+        remote = remote_raw.strip()
+        local = local_raw.strip()
+        if not remote or not local:
             errors.append(
-                f"Line {index} is missing a remote or local path: {cleaned!r}"
+                f"Path override line {index} is missing a remote or local path: {cleaned!r}"
             )
             continue
-        marker = (entry["remote"], entry["local"])
-        if marker in seen:
-            continue
-        seen.add(marker)
-        overrides.append(entry)
-
+        overrides.append({"remote": remote, "local": local})
     return overrides, errors
 
 
@@ -653,13 +637,25 @@ def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[s
     if not original_path:
         return None
 
-    overrides = config.get("path_overrides", [])
-    if overrides:
-        override_path = _apply_path_overrides(str(original_path), overrides)
-        if override_path:
-            return override_path
+    normalized_original = os.path.normpath(str(original_path)).replace("\\", "/")
 
-    folder_name = os.path.basename(str(original_path).rstrip(os.sep))
+    for override in config.get("path_overrides", []):
+        remote = (override.get("remote") or "").strip()
+        local = (override.get("local") or "").strip()
+        if not remote or not local:
+            continue
+        remote_normalized = os.path.normpath(remote).replace("\\", "/")
+        if normalized_original == remote_normalized:
+            remainder = ""
+        elif normalized_original.startswith(remote_normalized + "/"):
+            remainder = normalized_original[len(remote_normalized) + 1 :]
+        else:
+            continue
+        candidate = os.path.normpath(os.path.join(local, remainder)) if remainder else local
+        if os.path.isdir(candidate):
+            return candidate
+
+    folder_name = os.path.basename(original_path.rstrip(os.sep))
     if not folder_name:
         return None
 
@@ -688,7 +684,7 @@ def setup():
         raw_overrides = request.form.get("path_overrides") or ""
         overrides_text = raw_overrides
         override_entries, override_errors = parse_path_overrides(raw_overrides)
-        overrides = sanitize_override_entries(override_entries)
+        overrides = normalize_path_overrides(override_entries)
         errors.extend(override_errors)
 
         if not radarr_url:
