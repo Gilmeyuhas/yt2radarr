@@ -269,6 +269,18 @@ button[type="submit"]:hover {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.download-item:hover {
+  border-color: #4e8ef7;
+}
+
+.download-item.is-active {
+  border-color: #4e8ef7;
+  box-shadow: 0 0 0 1px rgba(78, 142, 247, 0.4);
+  background: #262a33;
 }
 
 .download-item .item-header {
