@@ -62,6 +62,16 @@
       </div>
       <p class="help-text">List each directory that contains your Radarr-managed movies, one per line.</p>
 
+      <div class="form-group">
+        <label for="path_overrides">Path Overrides</label>
+        <textarea
+          id="path_overrides"
+          name="path_overrides"
+          placeholder="/mnt/Movies =&gt; /Volumes/Movies"
+        >{{- overrides_text -}}</textarea>
+      </div>
+      <p class="help-text">Use overrides to map Radarr's movie paths to local directories on this machine. Format each line as <code>radarr/path =&gt; /local/path</code>.</p>
+
       <button type="submit">Save Configuration</button>
     </form>
   </div>
