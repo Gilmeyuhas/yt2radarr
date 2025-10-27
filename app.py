@@ -455,12 +455,16 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             return
 
         movie_path = movie.get("path")
-        resolved_path = resolve_movie_path(movie_path, config)
+        resolved_path, created_folder = resolve_movie_path(
+            movie_path, config, create_if_missing=True
+        )
         if resolved_path is None:
             fail(f"Movie folder not found on disk: {movie_path}")
             return
 
         movie_path = resolved_path
+        if created_folder:
+            log(f"Created movie folder at '{movie_path}'.")
         log(f"Movie path resolved to '{movie_path}'.")
         _job_status(job_id, "processing", progress=10)
 
@@ -633,16 +637,49 @@ def _apply_path_overrides(original_path: str, overrides: List[Dict[str, str]]) -
     return None
 
 
-def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[str]:
-    """Resolve a movie folder path using configured library paths."""
+def resolve_movie_path(
+    original_path: Optional[str],
+    config: Dict,
+    *,
+    create_if_missing: bool = False,
+) -> Tuple[Optional[str], bool]:
+    """Resolve a movie folder path using configured library paths.
 
-    if original_path and os.path.isdir(original_path):
-        return original_path
+    Returns a tuple of ``(path, created)`` where ``created`` indicates whether
+    the directory was created during resolution.
+    """
 
-    if not original_path:
-        return None
+    created = False
 
-    normalized_original = os.path.normpath(str(original_path)).replace("\\", "/")
+    def ensure_candidate(candidate: str, base_dir: Optional[str]) -> Optional[str]:
+        nonlocal created
+        if os.path.isdir(candidate):
+            return candidate
+        if not create_if_missing:
+            return None
+        candidate_base = base_dir or os.path.dirname(candidate)
+        if not candidate_base or not os.path.isdir(candidate_base):
+            return None
+        try:
+            os.makedirs(candidate, exist_ok=True)
+        except OSError:
+            return None
+        created = True
+        return candidate
+
+    if original_path:
+        normalized_path = os.path.normpath(str(original_path))
+        if os.path.isdir(normalized_path):
+            return normalized_path, created
+        direct_candidate = ensure_candidate(
+            normalized_path, os.path.dirname(normalized_path)
+        )
+        if direct_candidate:
+            return direct_candidate, created
+    else:
+        return None, created
+
+    normalized_original = normalized_path.replace("\\", "/")
 
     for override in config.get("path_overrides", []):
         remote = (override.get("remote") or "").strip()
@@ -656,20 +693,25 @@ def resolve_movie_path(original_path: Optional[str], config: Dict) -> Optional[s
             remainder = normalized_original[len(remote_normalized) + 1 :]
         else:
             continue
-        candidate = os.path.normpath(os.path.join(local, remainder)) if remainder else local
-        if os.path.isdir(candidate):
-            return candidate
+        candidate = (
+            os.path.normpath(os.path.join(local, remainder)) if remainder else local
+        )
+        base_dir = os.path.dirname(candidate) if remainder else None
+        resolved = ensure_candidate(candidate, base_dir or local)
+        if resolved:
+            return resolved, created
 
-    folder_name = os.path.basename(original_path.rstrip(os.sep))
+    folder_name = os.path.basename(normalized_path.rstrip(os.sep))
     if not folder_name:
-        return None
+        return None, created
 
     for base_path in config.get("file_paths", []):
         candidate = os.path.join(base_path, folder_name)
-        if os.path.isdir(candidate):
-            return candidate
+        resolved = ensure_candidate(candidate, base_path)
+        if resolved:
+            return resolved, created
 
-    return None
+    return None, created
 
 
 @app.route("/setup", methods=["GET", "POST"])
