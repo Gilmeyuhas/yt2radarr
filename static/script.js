@@ -1,39 +1,41 @@
 document.addEventListener('DOMContentLoaded', () => {
-  const form = document.getElementById('movieForm');
-  if (!form) {
+  const elements = {
+    form: document.getElementById('movieForm'),
+    ytInput: document.getElementById('yturl'),
+    movieNameInput: document.getElementById('movieName'),
+    movieOptions: document.getElementById('movieOptions'),
+    movieIdInput: document.getElementById('movieId'),
+    titleInput: document.getElementById('title'),
+    yearInput: document.getElementById('year'),
+    tmdbInput: document.getElementById('tmdb'),
+    resolutionSelect: document.getElementById('resolution'),
+    extensionSelect: document.getElementById('extension'),
+    extraCheckbox: document.getElementById('extra'),
+    extraTypeSelect: document.getElementById('extraType'),
+    extraFields: document.getElementById('extraFields'),
+    extraNameInput: document.getElementById('extra_name'),
+    consoleDiv: document.getElementById('console'),
+    downloadsList: document.getElementById('downloadsList')
+  };
+
+  if (!elements.form) {
     return;
   }
 
-  const ytInput = document.getElementById('yturl');
-  const movieNameInput = document.getElementById('movieName');
-  const movieOptions = document.getElementById('movieOptions');
-  const movieIdInput = document.getElementById('movieId');
-  const titleInput = document.getElementById('title');
-  const yearInput = document.getElementById('year');
-  const tmdbInput = document.getElementById('tmdb');
-  const resSelect = document.getElementById('resolution');
-  const extSelect = document.getElementById('extension');
-  const extraCheckbox = document.getElementById('extra');
-  const extraTypeSelect = document.getElementById('extraType');
-  const extraFields = document.getElementById('extraFields');
-  const extraNameInput = document.getElementById('extra_name');
-  const consoleDiv = document.getElementById('console');
-  const downloadsList = document.getElementById('downloadsList');
-
-  let downloadEntries = [];
-  const progressTimers = new Map();
   const STATUS_LABELS = {
     queued: 'Queued',
     processing: 'Processing',
     complete: 'Completed',
     failed: 'Failed'
   };
+
   const RESOLUTION_LABELS = {
     best: 'Best Available',
     '1080p': 'Up to 1080p',
     '720p': 'Up to 720p',
     '480p': 'Up to 480p'
   };
+
   const EXTRA_TYPE_LABELS = {
     trailer: 'Trailer',
     behindthescenes: 'Behind the Scenes',
@@ -44,51 +46,52 @@ document.addEventListener('DOMContentLoaded', () => {
     short: 'Short',
     other: 'Other'
   };
-  const MAX_DOWNLOAD_ENTRIES = 8;
 
-  function appendConsoleLine(text, isError) {
-    if (!consoleDiv) {
+  const MAX_DOWNLOAD_ENTRIES = 8;
+  const POLL_INTERVAL = 3000;
+
+  const state = {
+    downloads: [],
+    pollers: new Map()
+  };
+
+  function appendConsoleLine(text, isError = false) {
+    if (!elements.consoleDiv) {
       return;
     }
     const lineElem = document.createElement('div');
-    if (isError) {
-      line.classList.add('error-line');
-    }
     lineElem.textContent = text;
-    consoleDiv.appendChild(lineElem);
-    consoleDiv.scrollTop = consoleDiv.scrollHeight;
+    if (isError) {
+      lineElem.classList.add('error-line');
+    }
+    elements.consoleDiv.appendChild(lineElem);
+    elements.consoleDiv.scrollTop = elements.consoleDiv.scrollHeight;
   }
 
   function resetConsole(message) {
-    if (!consoleDiv) {
+    if (!elements.consoleDiv) {
       return;
     }
-    consoleDiv.innerHTML = '';
+    elements.consoleDiv.innerHTML = '';
     if (message) {
       appendConsoleLine(message);
     }
   }
 
-  function normalizeExtraLabel(type) {
-    if (!type) {
-      return '';
+  function renderLogLines(lines) {
+    if (!elements.consoleDiv) {
+      return;
     }
-    return EXTRA_TYPE_LABELS[type] || type;
-  }
-
-  function formatTime(value) {
-    if (!value) {
-      return '';
+    elements.consoleDiv.innerHTML = '';
+    const entries = Array.isArray(lines) ? lines : [];
+    if (!entries.length) {
+      appendConsoleLine('No output yet.');
+      return;
     }
-    const date = value instanceof Date ? value : new Date(value);
-    if (Number.isNaN(date.getTime())) {
-      return '';
-    }
-    try {
-      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    } catch (err) {
-      return date.toLocaleTimeString();
-    }
+    entries.forEach(line => {
+      const isError = typeof line === 'string' && line.trim().toUpperCase().startsWith('ERROR');
+      appendConsoleLine(line, isError);
+    });
   }
 
   function cleanErrorText(text) {
@@ -96,6 +99,32 @@ document.addEventListener('DOMContentLoaded', () => {
       return '';
     }
     return text.replace(/^ERROR:\s*/i, '').trim();
+  }
+
+  function parseDate(value) {
+    if (!value) {
+      return null;
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+    return date;
+  }
+
+  function formatTime(value) {
+    if (!value) {
+      return '';
+    }
+    const date = value instanceof Date ? value : parseDate(value);
+    if (!date) {
+      return '';
+    }
+    try {
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch (err) {
+      return date.toLocaleTimeString();
+    }
   }
 
   function buildDownloadItem(entry) {
@@ -147,162 +176,136 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const footer = document.createElement('div');
     footer.className = 'item-footer';
+
     const footerLeft = document.createElement('span');
     const metadataText = (entry.metadata || []).filter(Boolean).join(' • ');
     footerLeft.textContent = metadataText || ' ';
     footer.appendChild(footerLeft);
+
     const footerRight = document.createElement('span');
     const timestamp = entry.status === 'complete' || entry.status === 'failed'
-      ? formatTime(entry.updatedAt || entry.startedAt)
+      ? formatTime(entry.updatedAt || entry.completedAt)
       : formatTime(entry.startedAt);
     footerRight.textContent = timestamp;
     footer.appendChild(footerRight);
-    wrapper.appendChild(footer);
 
+    wrapper.appendChild(footer);
     return wrapper;
   }
 
   function renderDownloads() {
-    if (!downloadsList) {
+    if (!elements.downloadsList) {
       return;
     }
-    downloadsList.innerHTML = '';
-    if (!downloadEntries.length) {
-      downloadsList.classList.add('empty');
+    elements.downloadsList.innerHTML = '';
+    if (!state.downloads.length) {
+      elements.downloadsList.classList.add('empty');
       const empty = document.createElement('div');
       empty.className = 'empty-state';
       empty.textContent = 'No downloads yet.';
-      downloadsList.appendChild(empty);
+      elements.downloadsList.appendChild(empty);
       return;
     }
-    downloadsList.classList.remove('empty');
-    downloadEntries.forEach(entry => {
-      downloadsList.appendChild(buildDownloadItem(entry));
+
+    elements.downloadsList.classList.remove('empty');
+    state.downloads.forEach(entry => {
+      elements.downloadsList.appendChild(buildDownloadItem(entry));
     });
   }
 
-  function stopProgress(id) {
-    const timer = progressTimers.get(id);
+  function stopJobPolling(jobId) {
+    if (!jobId) {
+      return;
+    }
+    const timer = state.pollers.get(jobId);
     if (timer) {
       clearInterval(timer);
-      progressTimers.delete(id);
+      state.pollers.delete(jobId);
     }
   }
 
-  function upsertDownload(update) {
-    if (!downloadsList || !update || !update.id) {
+  async function pollJob(jobId, options = {}) {
+    if (!jobId) {
       return;
     }
-    const index = downloadEntries.findIndex(item => item.id === update.id);
+    try {
+      const response = await fetch(`/jobs/${encodeURIComponent(jobId)}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      const job = data && data.job ? data.job : null;
+      if (!job) {
+        stopJobPolling(jobId);
+        return;
+      }
+      const entry = normaliseJob(job);
+      if (entry) {
+        upsertDownload(entry);
+      }
+      if (options.showConsole && Array.isArray(job.logs)) {
+        renderLogLines(job.logs);
+      }
+      if (job.status === 'complete' || job.status === 'failed') {
+        stopJobPolling(jobId);
+      }
+    } catch (err) {
+      appendConsoleLine(`ERROR: Failed to poll job ${jobId}: ${err && err.message ? err.message : err}`, true);
+      stopJobPolling(jobId);
+    }
+  }
+
+  function startJobPolling(jobId, options = {}) {
+    if (!jobId || state.pollers.has(jobId)) {
+      return;
+    }
+    pollJob(jobId, options);
+    const timer = setInterval(() => pollJob(jobId, options), POLL_INTERVAL);
+    state.pollers.set(jobId, timer);
+  }
+
+  function upsertDownload(update) {
+    if (!update || !update.id) {
+      return;
+    }
+    const index = state.downloads.findIndex(item => item.id === update.id);
     if (index >= 0) {
-      const existing = downloadEntries[index];
-      const nextEntry = {
+      const existing = state.downloads[index];
+      state.downloads[index] = {
         ...existing,
         ...update,
         metadata: update.metadata || existing.metadata,
         subtitle: update.subtitle !== undefined ? update.subtitle : existing.subtitle,
         message: update.message !== undefined ? update.message : existing.message,
-        startedAt: existing.startedAt,
-        updatedAt: new Date()
+        progress: update.progress !== undefined ? update.progress : existing.progress,
+        startedAt: update.startedAt || existing.startedAt,
+        updatedAt: update.updatedAt || new Date()
       };
-      downloadEntries[index] = nextEntry;
     } else {
-      const entry = {
+      const now = new Date();
+      state.downloads.push({
         metadata: [],
         subtitle: '',
         message: '',
-        progress: 0,
+        progress: typeof update.progress === 'number' ? update.progress : 0,
         ...update,
-        progress: update.progress !== undefined ? update.progress : 0,
-        startedAt: update.startedAt || new Date(),
-        updatedAt: new Date()
-      };
-      downloadEntries.unshift(entry);
-      if (downloadEntries.length > MAX_DOWNLOAD_ENTRIES) {
-        const removed = downloadEntries.splice(MAX_DOWNLOAD_ENTRIES);
-        removed.forEach(item => stopProgress(item.id));
-      }
+        startedAt: update.startedAt || now,
+        updatedAt: update.updatedAt || now
+      });
     }
-    renderDownloads();
-  }
 
-  function startProgress(id) {
-    if (!downloadsList || progressTimers.has(id)) {
-      return;
-    }
-    const timer = setInterval(() => {
-      const entry = downloadEntries.find(item => item.id === id);
-      if (!entry) {
-        clearInterval(timer);
-        progressTimers.delete(id);
-        return;
-      }
-      if (entry.status !== 'processing') {
-        clearInterval(timer);
-        progressTimers.delete(id);
-        return;
-      }
-      const nextProgress = Math.min(90, (entry.progress || 0) + (Math.random() * 10 + 5));
-      upsertDownload({ id, progress: nextProgress });
-    }, 1500);
-    progressTimers.set(id, timer);
-  }
-
-  function createDownloadEntry(payload) {
-    if (!downloadsList) {
-      return null;
-    }
-    const now = new Date();
-    const fallbackTitle = payload.title || titleInput.value.trim();
-    const movieLabel = payload.movieName || fallbackTitle || 'Selected Movie';
-    const extraDescriptor = payload.extra
-      ? (payload.extra_name || normalizeExtraLabel(payload.extraType))
-      : '';
-    const label = extraDescriptor ? `${movieLabel} – ${extraDescriptor}` : movieLabel;
-    const metadata = [
-      `Format: ${(payload.extension || 'mp4').toUpperCase()}`,
-      `Resolution: ${RESOLUTION_LABELS[payload.resolution] || payload.resolution || 'Best Available'}`
-    ];
-    if (payload.extra) {
-      metadata.unshift(`Stored as extra content`);
-    }
-    return {
-      id: `dl-${now.getTime()}-${Math.floor(Math.random() * 1000)}`,
-      label: label || 'Radarr Download',
-      status: 'processing',
-      progress: 18,
-      metadata,
-      subtitle: payload.extra ? `Extra • ${extraDescriptor || normalizeExtraLabel(payload.extraType)}` : '',
-      startedAt: now,
-      updatedAt: now,
-      message: ''
-    };
-  }
-
-  function completeDownload(entryId, status, message) {
-    if (!entryId) {
-      return;
-    }
-    stopProgress(entryId);
-    upsertDownload({
-      id: entryId,
-      status,
-      progress: 100,
-      message: status === 'failed' ? message : ''
+    state.downloads.sort((a, b) => {
+      const left = (a.startedAt instanceof Date ? a.startedAt : parseDate(a.startedAt)) || new Date(0);
+      const right = (b.startedAt instanceof Date ? b.startedAt : parseDate(b.startedAt)) || new Date(0);
+      return right.getTime() - left.getTime();
     });
-  }
 
-  function updateExtraVisibility() {
-    if (extraCheckbox.checked) {
-      extraFields.style.display = 'block';
-      extraNameInput.required = true;
-    } else {
-      extraFields.style.display = 'none';
-      extraNameInput.required = false;
-      extraNameInput.value = '';
-      extraTypeSelect.value = 'trailer';
+    if (state.downloads.length > MAX_DOWNLOAD_ENTRIES) {
+      const removed = state.downloads.splice(MAX_DOWNLOAD_ENTRIES);
+      removed.forEach(entry => stopJobPolling(entry.id));
     }
-    state.pollers.delete(jobId);
+
+    renderDownloads();
   }
 
   function normaliseJob(job) {
@@ -317,44 +320,43 @@ document.addEventListener('DOMContentLoaded', () => {
       status = 'queued';
     }
     const startedAt = parseDate(job.started_at || job.created_at) || new Date();
-    const updatedAt = parseDate(job.updated_at || job.started_at || job.created_at) || new Date();
-    const progress = typeof job.progress === 'number' ? Math.max(0, Math.min(100, job.progress)) : 0;
+    const updatedAt = parseDate(job.updated_at || job.completed_at || job.started_at || job.created_at) || startedAt;
+    const metadata = Array.isArray(job.metadata) ? job.metadata : [];
     return {
       id: job.id,
       label: job.label || 'Radarr Download',
-      status,
-      progress,
-      metadata: Array.isArray(job.metadata) ? job.metadata : [],
       subtitle: job.subtitle || '',
+      status,
+      progress: typeof job.progress === 'number' ? Math.max(0, Math.min(100, job.progress)) : 0,
+      metadata,
       message: job.message || '',
       startedAt,
-      updatedAt,
+      updatedAt
     };
   }
 
-  movieNameInput.addEventListener('input', () => {
-    const inputVal = movieNameInput.value;
-    let matched = false;
-    for (let i = 0; i < elements.movieOptions.options.length; i += 1) {
-      const option = elements.movieOptions.options[i];
-      if (option.value === inputVal) {
-        matched = true;
-        if (elements.movieIdInput) {
-          elements.movieIdInput.value = option.getAttribute('data-id') || '';
-        }
-        if (elements.titleInput) {
-          elements.titleInput.value = option.getAttribute('data-title') || '';
-        }
-        if (elements.yearInput) {
-          elements.yearInput.value = option.getAttribute('data-year') || '';
-        }
-        if (elements.tmdbInput) {
-          elements.tmdbInput.value = option.getAttribute('data-tmdb') || '';
-        }
-        break;
-      }
+  function syncMovieSelection() {
+    if (!elements.movieNameInput || !elements.movieOptions) {
+      return;
     }
-    if (!matched) {
+    const inputVal = elements.movieNameInput.value.trim();
+    const options = Array.from(elements.movieOptions.options || []);
+    const matchedOption = options.find(option => option.value === inputVal) || null;
+
+    if (matchedOption) {
+      if (elements.movieIdInput) {
+        elements.movieIdInput.value = matchedOption.getAttribute('data-id') || '';
+      }
+      if (elements.titleInput) {
+        elements.titleInput.value = matchedOption.getAttribute('data-title') || '';
+      }
+      if (elements.yearInput) {
+        elements.yearInput.value = matchedOption.getAttribute('data-year') || '';
+      }
+      if (elements.tmdbInput) {
+        elements.tmdbInput.value = matchedOption.getAttribute('data-tmdb') || '';
+      }
+    } else {
       if (elements.movieIdInput) elements.movieIdInput.value = '';
       if (elements.titleInput) elements.titleInput.value = '';
       if (elements.yearInput) elements.yearInput.value = '';
@@ -362,7 +364,53 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  form.addEventListener('submit', event => {
+  function updateExtraVisibility() {
+    if (!elements.extraFields || !elements.extraCheckbox || !elements.extraNameInput || !elements.extraTypeSelect) {
+      return;
+    }
+    if (elements.extraCheckbox.checked) {
+      elements.extraFields.style.display = 'block';
+      elements.extraNameInput.required = true;
+    } else {
+      elements.extraFields.style.display = 'none';
+      elements.extraNameInput.required = false;
+      elements.extraNameInput.value = '';
+      elements.extraTypeSelect.value = 'trailer';
+    }
+  }
+
+  async function loadInitialJobs() {
+    try {
+      const response = await fetch('/jobs');
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+      jobs.forEach(job => {
+        const entry = normaliseJob(job);
+        if (entry) {
+          upsertDownload(entry);
+        }
+        if (job.status === 'queued' || job.status === 'processing') {
+          startJobPolling(job.id);
+        }
+      });
+    } catch (err) {
+      appendConsoleLine(`ERROR: Failed to load job history: ${err && err.message ? err.message : err}`, true);
+    }
+  }
+
+  if (elements.movieNameInput) {
+    elements.movieNameInput.addEventListener('input', syncMovieSelection);
+    elements.movieNameInput.addEventListener('change', syncMovieSelection);
+  }
+
+  if (elements.extraCheckbox) {
+    elements.extraCheckbox.addEventListener('change', updateExtraVisibility);
+  }
+
+  elements.form.addEventListener('submit', async event => {
     event.preventDefault();
 
     const payload = {
@@ -376,101 +424,70 @@ document.addEventListener('DOMContentLoaded', () => {
       extension: elements.extensionSelect ? elements.extensionSelect.value : 'mp4',
       extra: elements.extraCheckbox ? elements.extraCheckbox.checked : false,
       extraType: elements.extraTypeSelect ? elements.extraTypeSelect.value : 'trailer',
-      extra_name: elements.extraNameInput ? elements.extraNameInput.value.trim() : '',
+      extra_name: elements.extraNameInput ? elements.extraNameInput.value.trim() : ''
     };
 
     resetConsole('Submitting request...');
 
+    const errors = [];
     if (!payload.yturl) {
-      appendConsoleLine('ERROR: YouTube URL is required.', true);
-      return;
-    }
-    const ytPattern = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//;
-    if (!ytPattern.test(payload.yturl)) {
-      appendConsoleLine('ERROR: Please enter a valid YouTube URL.', true);
-      return;
+      errors.push('YouTube URL is required.');
+    } else {
+      const ytPattern = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//i;
+      if (!ytPattern.test(payload.yturl)) {
+        errors.push('Please enter a valid YouTube URL.');
+      }
     }
     if (!payload.movieId) {
-      appendConsoleLine('ERROR: Please select a valid movie from the list.', true);
-      return;
+      errors.push('Please select a valid movie from the list.');
     }
     if (payload.extra && !payload.extra_name) {
-      appendConsoleLine('ERROR: Please provide an extra name.', true);
+      errors.push('Please provide an extra name.');
+    }
+
+    if (errors.length) {
+      errors.forEach(message => appendConsoleLine(`ERROR: ${message}`, true));
       return;
     }
 
-    const downloadEntry = createDownloadEntry(payload);
-    const entryId = downloadEntry ? downloadEntry.id : null;
-    if (downloadEntry) {
-      upsertDownload(downloadEntry);
-      startProgress(downloadEntry.id);
-    }
-
-    fetch('/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    })
-      .then(response => response.json().then(data => ({ ok: response.ok, data })))
-      .then(({ ok, data }) => {
-        if (consoleDiv) {
-          consoleDiv.innerHTML = '';
-        }
-        const logs = Array.isArray(data.logs) ? data.logs : [];
-        if (logs.length > 0) {
-          logs.forEach(line => {
-            const isError = typeof line === 'string' && line.startsWith('ERROR');
-            appendConsoleLine(line, isError);
-          });
-        } else {
-          appendConsoleLine('No output.', false);
-        }
-        const errorLines = logs.filter(line => typeof line === 'string' && line.startsWith('ERROR'));
-        const hasError = !ok || errorLines.length > 0;
-        if (!ok && errorLines.length === 0) {
-          appendConsoleLine('ERROR: Request failed.', true);
-        }
-        if (entryId) {
-          const message = hasError ? cleanErrorText(errorLines[0] || 'Request failed.') : '';
-          completeDownload(entryId, hasError ? 'failed' : 'complete', message);
-        }
-      })
-      .catch(err => {
-        if (consoleDiv) {
-          consoleDiv.innerHTML = '';
-        }
-        const message = err && err.message ? err.message : String(err);
-        appendConsoleLine('ERROR: ' + message, true);
-        if (entryId) {
-          completeDownload(entryId, 'failed', message);
-        }
+    try {
+      const response = await fetch('/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
       });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        const logs = Array.isArray(data.logs) ? data.logs : [];
+        if (logs.length) {
+          renderLogLines(logs);
+        } else {
+          renderLogLines(['ERROR: Request failed.']);
+        }
+        throw new Error(cleanErrorText(logs[0] || 'Request failed.'));
+      }
 
       const job = data && data.job ? data.job : null;
       if (!job || !job.id) {
-        appendConsoleLine('ERROR: No job information returned.', true);
-        return;
+        renderLogLines(['ERROR: No job information returned.']);
+        throw new Error('No job information returned.');
       }
 
-      state.selectedJobId = job.id;
-      renderDownloads();
-      renderLogLines(job.logs || []);
+      const logs = Array.isArray(job.logs) ? job.logs : ['Job queued.'];
+      renderLogLines(logs);
 
       const entry = normaliseJob(job);
       if (entry) {
         upsertDownload(entry);
       }
-      beginJobPolling(job.id, { showConsole: true });
+      startJobPolling(job.id, { showConsole: true });
     } catch (err) {
-      if (err && err.response && Array.isArray(err.response.logs)) {
-        renderLogLines(err.response.logs);
-      } else {
-        appendConsoleLine(`ERROR: ${err && err.message ? err.message : err}`, true);
-      }
+      appendConsoleLine(`ERROR: ${err && err.message ? err.message : err}`, true);
     }
   });
 
   updateExtraVisibility();
   renderDownloads();
+  loadInitialJobs();
 });
-
