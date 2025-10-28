@@ -1,10 +1,10 @@
-import glob
 import json
 import os
 import re
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 from typing import Dict, List, Optional, Tuple
 
@@ -291,11 +291,9 @@ def _describe_job(payload: Dict) -> Dict:
     else:
         label = movie_label
         subtitle = ""
-    metadata = [
-        "Stored as extra content" if extra else "",
-        f"Format: {(payload.get('extension') or 'mp4').strip().upper() or 'MP4'}",
-    ]
-    metadata = [item for item in metadata if item]
+    metadata = []
+    if extra:
+        metadata.append("Stored as extra content")
     return {"label": label or "Radarr Download", "subtitle": subtitle, "metadata": metadata}
 
 
@@ -333,10 +331,6 @@ def create():
     if extra and not extra_name:
         error("Extra name is required when storing in a subfolder.")
 
-    extension = (data.get("extension") or "mp4").strip().lower()
-    if extension not in {"mp4", "mkv"}:
-        error(f"Unsupported file extension '{extension}'.")
-
     if errors:
         return jsonify({"logs": logs}), 400
 
@@ -347,7 +341,6 @@ def create():
         "title": (data.get("title") or "").strip(),
         "year": (data.get("year") or "").strip(),
         "tmdb": (data.get("tmdb") or "").strip(),
-        "extension": extension,
         "extra": extra,
         "extraType": (data.get("extraType") or "trailer").strip().lower(),
         "extra_name": extra_name,
@@ -434,9 +427,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         extra = bool(payload.get("extra"))
         extra_name = (payload.get("extra_name") or "").strip()
-        extension = (payload.get("extension") or "mp4").strip().lower()
-        requested_extension = extension
-
         try:
             log(f"Fetching Radarr details for movie ID {movie_id}.")
             response = requests.get(
@@ -497,9 +487,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 canonical_stem = f"{movie_stem} {extra_label}"
                 log(f"Using extra label '{extra_label}'.")
 
-        canonical_filename = f"{canonical_stem}.{extension}"
-        canonical_path = os.path.join(target_dir, canonical_filename)
-
         descriptive = extra_name
         if descriptive:
             log(f"Using custom descriptive name '{descriptive}'.")
@@ -509,12 +496,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 yt_cmd = [
                     "yt-dlp",
                     "--get-title",
-                    "--user-agent",
-                    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
-                    "--extractor-args",
-                    "youtube:player_client=android",
-                    "--referer",
-                    yt_url,
                 ]
                 if COOKIE_PATH:
                     yt_cmd += ["--cookies", COOKIE_PATH]
@@ -533,77 +514,26 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     f"Failed to retrieve title from yt-dlp ({exc}). Using fallback name 'Video'."
                 )
 
-        descriptive = sanitize_filename(descriptive)
-
-        if extra:
-            extra_suffix = sanitize_filename(extra_name) or extra_type
-            if extra_suffix:
-                filename = f"{descriptive}-{extra_suffix}.{extension}"
-            else:
-                filename = f"{descriptive}.{extension}"
-        else:
-            filename = f"{descriptive}.{extension}"
-
-        filename_base, _ = os.path.splitext(filename)
-        pattern = os.path.join(target_dir, f"{filename_base}.*")
-        if any(os.path.exists(path) for path in glob.glob(pattern)):
-            log(f"File '{filename}' already exists. Searching for a free filename.")
-            index = 1
-            while True:
-                candidate_base = f"{filename_base} ({index})"
-                candidate_pattern = os.path.join(target_dir, f"{candidate_base}.*")
-                if not any(os.path.exists(path) for path in glob.glob(candidate_pattern)):
-                    filename_base = candidate_base
-                    filename = f"{filename_base}.{extension}"
-                    log(f"Selected new filename '{filename}'.")
-                    break
-                index += 1
-
-        # ``yt-dlp`` treats ``-o`` arguments as templates using ``%(field)s``
-        # placeholders. If the filename stem itself contains ``%`` characters
-        # (which is common for titles like ``100% Fun``) the template must
-        # escape them as ``%%`` or yt-dlp will attempt to treat them as
-        # formatting tokens and abort.  The canonical filename should still
-        # contain the literal ``%`` once the download is complete, so only the
-        # template string is escaped here.
-        template_base = filename_base.replace("%", "%%")
-
-        target_template = os.path.join(target_dir, f"{template_base}.%(ext)s")
-        target_path = os.path.join(target_dir, filename)
-
         if shutil.which("ffmpeg") is None:
             warn(
                 "ffmpeg executable not found; yt-dlp may fall back to a lower quality progressive stream."
             )
 
-        base_command_prefix = [
-            "yt-dlp",
-            "--newline",
-            # pretend to be an Android Chrome client YouTube still feeds without as much friction
-            "--user-agent",
-            "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
-            "--extractor-args",
-            "youtube:player_client=android",
-
-            # makes some requests look more like normal watch page navigation
-            "--referer",
-            yt_url,
-        ]
-        if COOKIE_PATH:
-            base_command_prefix += ["--cookies", COOKIE_PATH]
-
-        base_command_suffix = [
-            "-o",
-            target_template,
-            yt_url,
-        ]
-
         _job_status(job_id, "processing", progress=20)
 
-        progress_pattern = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
-        command = base_command_prefix + base_command_suffix
+        existing_files = {
+            os.path.join(target_dir, entry)
+            for entry in os.listdir(target_dir)
+        }
+        start_time = time.time()
 
-        log("Running yt-dlp with automatic best-quality selection.")
+        progress_pattern = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
+        command = ["yt-dlp"]
+        if COOKIE_PATH:
+            command += ["--cookies", COOKIE_PATH]
+        command.append(yt_url)
+
+        log("Running yt-dlp with minimal invocation.")
 
         output_lines: List[str] = []
         try:
@@ -613,16 +543,18 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                cwd=target_dir,
             )
         except Exception as exc:  # pragma: no cover - command failure
             fail(f"Failed to invoke yt-dlp: {exc}")
             return
 
         assert process.stdout is not None
-        for raw_line in process.stdout:
-            line = raw_line.rstrip()
+
+        def handle_output_line(text: str) -> None:
+            line = text.strip()
             if not line:
-                continue
+                return
             output_lines.append(line)
             log(line)
             match = progress_pattern.search(line)
@@ -630,8 +562,25 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 try:
                     progress_value = float(match.group(1))
                 except (TypeError, ValueError):
-                    continue
+                    return
                 _job_status(job_id, "processing", progress=progress_value)
+
+        buffer = ""
+        while True:
+            chunk = process.stdout.read(1)
+            if chunk == "":
+                if process.poll() is not None:
+                    if buffer:
+                        handle_output_line(buffer)
+                        buffer = ""
+                    break
+                continue
+            if chunk in {"\n", "\r"}:
+                if buffer:
+                    handle_output_line(buffer)
+                    buffer = ""
+                continue
+            buffer += chunk
 
         process.stdout.close()
         return_code = process.wait()
@@ -640,52 +589,56 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             failure_summary = output_lines[-1] if output_lines else "Download failed."
             log(f"yt-dlp exited with code {return_code}.")
 
-            leftover_pattern = os.path.join(target_dir, f"{filename_base}.*")
-            for leftover in glob.glob(leftover_pattern):
-                if leftover.endswith(".part") or leftover.endswith(".ytdl"):
-                    try:
-                        os.remove(leftover)
-                    except OSError:
-                        continue
+            for entry in os.listdir(target_dir):
+                candidate = os.path.join(target_dir, entry)
+                if not os.path.isfile(candidate):
+                    continue
+                if candidate in existing_files:
+                    continue
+                if not (entry.endswith(".part") or entry.endswith(".ytdl")):
+                    continue
+                try:
+                    os.remove(candidate)
+                except OSError:
+                    continue
 
             fail(f"Download failed: {failure_summary[:300]}")
             return
 
-        downloaded_candidates = [
-            path
-            for path in glob.glob(os.path.join(target_dir, f"{filename_base}.*"))
-            if os.path.isfile(path) and not path.endswith(".part")
-        ]
+        downloaded_candidates: List[str] = []
+        for entry in os.listdir(target_dir):
+            candidate = os.path.join(target_dir, entry)
+            if not os.path.isfile(candidate):
+                continue
+            if entry.endswith(".part") or entry.endswith(".ytdl"):
+                continue
+            if candidate not in existing_files or os.path.getmtime(candidate) >= start_time:
+                downloaded_candidates.append(candidate)
+
         if not downloaded_candidates:
             fail("Download completed but the output file could not be located.")
             return
 
-        # When multiple files exist (which should be rare), pick the most recent one.
         downloaded_candidates.sort(key=os.path.getmtime, reverse=True)
         target_path = downloaded_candidates[0]
-        actual_extension = os.path.splitext(target_path)[1].lstrip(".").lower() or extension
+        actual_extension = os.path.splitext(target_path)[1].lstrip(".").lower()
 
-        if actual_extension != extension:
-            log(
-                f"Detected output extension '{actual_extension}' differing from requested '{extension}'; using actual extension."
-            )
-        if actual_extension != requested_extension:
-            job_snapshot = jobs_repo.get(job_id)
-            if job_snapshot:
-                metadata = list(job_snapshot.get("metadata") or [])
-                updated_metadata: List[str] = []
-                replaced = False
-                for item in metadata:
-                    if isinstance(item, str) and item.lower().startswith("format:"):
-                        updated_metadata.append(f"Format: {actual_extension.upper()}")
-                        replaced = True
-                    else:
-                        updated_metadata.append(item)
-                if not replaced:
-                    updated_metadata.append(f"Format: {actual_extension.upper()}")
-                jobs_repo.update(job_id, {"metadata": updated_metadata})
-        extension = actual_extension
-        canonical_filename = f"{canonical_stem}.{extension}"
+        job_snapshot = jobs_repo.get(job_id)
+        if job_snapshot:
+            metadata = list(job_snapshot.get("metadata") or [])
+            updated_metadata: List[str] = []
+            for item in metadata:
+                if isinstance(item, str) and item.lower().startswith("format:"):
+                    continue
+                updated_metadata.append(item)
+            if actual_extension:
+                updated_metadata.append(f"Format: {actual_extension.upper()}")
+            jobs_repo.update(job_id, {"metadata": updated_metadata})
+
+        if actual_extension:
+            canonical_filename = f"{canonical_stem}.{actual_extension}"
+        else:
+            canonical_filename = canonical_stem
         canonical_path = os.path.join(target_dir, canonical_filename)
         if os.path.exists(canonical_path):
             base_name, ext_part = os.path.splitext(canonical_filename)
