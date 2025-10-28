@@ -614,27 +614,54 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 text=True,
                 bufsize=1,
             )
-        except Exception as exc:  # pragma: no cover - command failure
-            fail(f"Failed to invoke yt-dlp: {exc}")
-            return
 
-        assert process.stdout is not None
-        for raw_line in process.stdout:
-            line = raw_line.rstrip()
-            if not line:
-                continue
-            output_lines.append(line)
-            log(line)
-            match = progress_pattern.search(line)
-            if match:
-                try:
-                    progress_value = float(match.group(1))
-                except (TypeError, ValueError):
+            command = (
+                base_command_prefix
+                + ["-f", format_selector, "-S", format_sort]
+                + base_command_suffix
+            )
+
+            log("Running yt-dlp with explicit best-quality format preferences.")
+
+            output_lines: List[str] = []
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+            except Exception as exc:  # pragma: no cover - command failure
+                fail(f"Failed to invoke yt-dlp: {exc}")
+                return
+
+            assert process.stdout is not None
+            for raw_line in process.stdout:
+                line = raw_line.rstrip()
+                if not line:
                     continue
-                _job_status(job_id, "processing", progress=progress_value)
+                output_lines.append(line)
+                log(line)
+                match = progress_pattern.search(line)
+                if match:
+                    try:
+                        progress_value = float(match.group(1))
+                    except (TypeError, ValueError):
+                        continue
+                    _job_status(job_id, "processing", progress=progress_value)
 
-        process.stdout.close()
-        return_code = process.wait()
+            process.stdout.close()
+            return_code = process.wait()
+
+            if return_code == 0:
+                download_success = True
+                break
+
+            failure_summary = output_lines[-1] if output_lines else failure_summary
+            log(
+                f"yt-dlp exited with code {return_code} while using selector '{format_selector}'."
+            )
 
         if return_code != 0:
             failure_summary = output_lines[-1] if output_lines else "Download failed."
