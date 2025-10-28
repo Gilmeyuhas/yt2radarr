@@ -8,7 +8,6 @@ document.addEventListener('DOMContentLoaded', () => {
     titleInput: document.getElementById('title'),
     yearInput: document.getElementById('year'),
     tmdbInput: document.getElementById('tmdb'),
-    resolutionSelect: document.getElementById('resolution'),
     extensionSelect: document.getElementById('extension'),
     extraCheckbox: document.getElementById('extra'),
     extraTypeSelect: document.getElementById('extraType'),
@@ -27,13 +26,6 @@ document.addEventListener('DOMContentLoaded', () => {
     processing: 'Processing',
     complete: 'Completed',
     failed: 'Failed'
-  };
-
-  const RESOLUTION_LABELS = {
-    best: 'Best Available',
-    '1080p': 'Up to 1080p',
-    '720p': 'Up to 720p',
-    '480p': 'Up to 480p'
   };
 
   const EXTRA_TYPE_LABELS = {
@@ -420,7 +412,6 @@ document.addEventListener('DOMContentLoaded', () => {
       title: elements.titleInput ? elements.titleInput.value.trim() : '',
       year: elements.yearInput ? elements.yearInput.value.trim() : '',
       tmdb: elements.tmdbInput ? elements.tmdbInput.value.trim() : '',
-      resolution: elements.resolutionSelect ? elements.resolutionSelect.value : 'best',
       extension: elements.extensionSelect ? elements.extensionSelect.value : 'mp4',
       extra: elements.extraCheckbox ? elements.extraCheckbox.checked : false,
       extraType: elements.extraTypeSelect ? elements.extraTypeSelect.value : 'trailer',
