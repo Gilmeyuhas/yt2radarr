@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import uuid
@@ -230,6 +231,25 @@ def build_movie_stem(movie: Dict) -> str:
     stem = " ".join(parts)
     cleaned = sanitize_filename(stem)
     return cleaned or "Movie"
+
+
+def build_best_format_preferences(extension: str) -> Tuple[str, str]:
+    """Return yt-dlp format selector and sorting preferences for best quality."""
+
+    normalized_extension = (extension or "mp4").strip().lower()
+
+    selector = "bv*+ba/b"
+    sort = "res,codec:av1,codec:vp9,codec:hevc,codec:h264,acodec:opus,acodec:m4a"
+
+    if normalized_extension == "mp4":
+        # Prefer streams that can be muxed into MP4 without re-encoding while
+        # keeping a generic fallback when ideal streams are missing.
+        selector = "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"
+        sort = f"{sort},ext:mp4:m4a"
+    else:
+        sort = f"{sort},ext:mkv,ext:webm,ext:mp4:m4a"
+
+    return selector, sort
 
 
 def resolve_movie_by_metadata(
@@ -555,19 +575,38 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     break
                 index += 1
 
+        format_selector, format_sort = build_best_format_preferences(extension)
+        log(
+            "Requesting yt-dlp formats with selector '%s' sorted by '%s'."
+            % (format_selector, format_sort)
+        )
+
+        if shutil.which("ffmpeg") is None:
+            warn(
+                "ffmpeg executable not found; yt-dlp may fall back to a lower quality progressive stream."
+            )
+
         command = [
             "yt-dlp",
             "--newline",
+            "-f",
+            format_selector,
+            "-S",
+            format_sort,
 
             # merge/remux to mp4 if needed
-            "--merge-output-format", extension,
+            "--merge-output-format",
+            extension,
 
             # pretend to be an Android Chrome client YouTube still feeds without as much friction
-            "--user-agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
-            "--extractor-args", "youtube:player_client=android",
+            "--user-agent",
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+            "--extractor-args",
+            "youtube:player_client=android",
 
             # makes some requests look more like normal watch page navigation
-            "--referer", yt_url,
+            "--referer",
+            yt_url,
         ]
         if COOKIE_PATH:
             command += ["--cookies", COOKIE_PATH]
@@ -577,7 +616,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             yt_url,
         ]
 
-        log("Running yt-dlp with default (best available) format selection.")
+        log("Running yt-dlp with explicit best-quality format preferences.")
         _job_status(job_id, "processing", progress=20)
 
         output_lines: List[str] = []
