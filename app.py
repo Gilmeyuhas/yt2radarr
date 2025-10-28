@@ -617,39 +617,39 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         except Exception as exc:  # pragma: no cover - command failure
             fail(f"Failed to invoke yt-dlp: {exc}")
             return
-        else:
-            assert process.stdout is not None
-            for raw_line in process.stdout:
-                line = raw_line.rstrip()
-                if not line:
+
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            output_lines.append(line)
+            log(line)
+            match = progress_pattern.search(line)
+            if match:
+                try:
+                    progress_value = float(match.group(1))
+                except (TypeError, ValueError):
                     continue
-                output_lines.append(line)
-                log(line)
-                match = progress_pattern.search(line)
-                if match:
+                _job_status(job_id, "processing", progress=progress_value)
+
+        process.stdout.close()
+        return_code = process.wait()
+
+        if return_code != 0:
+            failure_summary = output_lines[-1] if output_lines else "Download failed."
+            log(f"yt-dlp exited with code {return_code}.")
+
+            leftover_pattern = os.path.join(target_dir, f"{filename_base}.*")
+            for leftover in glob.glob(leftover_pattern):
+                if leftover.endswith(".part") or leftover.endswith(".ytdl"):
                     try:
-                        progress_value = float(match.group(1))
-                    except (TypeError, ValueError):
+                        os.remove(leftover)
+                    except OSError:
                         continue
-                    _job_status(job_id, "processing", progress=progress_value)
 
-            process.stdout.close()
-            return_code = process.wait()
-
-            if return_code != 0:
-                failure_summary = output_lines[-1] if output_lines else "Download failed."
-                log(f"yt-dlp exited with code {return_code}.")
-
-                leftover_pattern = os.path.join(target_dir, f"{filename_base}.*")
-                for leftover in glob.glob(leftover_pattern):
-                    if leftover.endswith(".part") or leftover.endswith(".ytdl"):
-                        try:
-                            os.remove(leftover)
-                        except OSError:
-                            continue
-
-                fail(f"Download failed: {failure_summary[:300]}")
-                return
+            fail(f"Download failed: {failure_summary[:300]}")
+            return
 
         downloaded_candidates = [
             path
