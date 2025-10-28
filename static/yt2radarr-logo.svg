@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="logo-title logo-desc">
+  <title id="logo-title">YT2Radarr logo</title>
+  <desc id="logo-desc">Dark rounded square containing the YouTube logo, a red arrow, and the Radarr play emblem above the YT2Radarr name.</desc>
+  <defs>
+    <linearGradient id="arrowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#f24444" />
+      <stop offset="100%" stop-color="#d81818" />
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="464" height="464" rx="104" fill="#1f232d" />
+  <g transform="translate(64 118)">
+    <rect x="12" y="58" width="180" height="124" rx="28" fill="#ff2121" />
+    <polygon points="88,88 88,152 154,120" fill="#ffffff" />
+    <g transform="translate(210 84)">
+      <rect x="0" y="34" width="116" height="24" rx="12" fill="url(#arrowGradient)" />
+      <polygon points="116,12 116,80 168,46" fill="url(#arrowGradient)" />
+    </g>
+    <g transform="translate(318 40)">
+      <path d="M76 0c41.97 0 76 34.03 76 76s-34.03 76-76 76S0 117.97 0 76 34.03 0 76 0Z" fill="#ffffff" />
+      <path d="M76 20c30.93 0 56 25.07 56 56s-25.07 56-56 56-56-25.07-56-56 25.07-56 56-56Z" fill="#1f232d" />
+      <path d="M38 76c0-20.99 17.01-38 38-38 5.94 0 11.66 1.38 16.84 3.99l37.16 19.01a12 12 0 0 1 0 21.99l-37.16 19.01A37.88 37.88 0 0 1 76 114c-20.99 0-38-17.01-38-38Z" fill="#ffc845" />
+      <path d="m74 52 36 18-36 18V52Z" fill="#1f232d" />
+    </g>
+  </g>
+  <g transform="translate(96 344)">
+    <text x="0" y="40" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="72" font-weight="700" fill="#f5f7fb">YT2</text>
+    <text x="168" y="40" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="72" font-weight="700" fill="#f7941d">Radarr</text>
+  </g>
+</svg>

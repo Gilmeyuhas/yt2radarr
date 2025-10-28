@@ -233,14 +233,41 @@ def build_movie_stem(movie: Dict) -> str:
 
 
 def build_format_selector(resolution: str) -> str:
-    """Return a yt-dlp format selector for the requested resolution."""
-    mapping = {
-        "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-        "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]",
-        "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]",
-        "best": "bestvideo+bestaudio/best",
+    """Return a yt-dlp format selector for the requested resolution.
+
+    The selector prioritises the highest fidelity stream below 4K, including
+    muxed video+audio variants and progressively broader fallbacks so downloads
+    still succeed when ideal streams are missing. Dedicated resolution requests
+    also inherit the non-4K fallback to make sure we do not inadvertently grab
+    a lower tier (for example, 360p) when higher quality is available.
+    """
+
+    def join_formats(*candidates: str) -> str:
+        return "/".join([candidate for candidate in candidates if candidate])
+
+    best_non_4k = join_formats(
+        "bv*[height<2160]+ba",
+        "bv*[height<2160]",
+        "b[height<2160]",
+    )
+
+    resolution = (resolution or "best").strip().lower()
+    height_limits = {
+        "1080p": 1080,
+        "720p": 720,
+        "480p": 480,
     }
-    return mapping.get(resolution, mapping["best"])
+
+    limit = height_limits.get(resolution)
+    if limit is not None:
+        limited_selector = join_formats(
+            f"bv*[height<={limit}]+ba",
+            f"bv*[height<={limit}]",
+            f"b[height<={limit}]",
+        )
+        return join_formats(limited_selector, best_non_4k, "best")
+
+    return join_formats(best_non_4k, "best")
 
 
 def resolve_movie_by_metadata(
@@ -323,8 +350,6 @@ def index():
     movies = get_all_movies()
     config = load_config()
     return render_template("index.html", movies=movies, configured=is_configured(config))
-
-
 @app.route("/create", methods=["POST"])
 def create():
     config = load_config()
@@ -585,10 +610,10 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             "yt-dlp",
             "--newline",
 
-            # more forgiving format fallback:
-            # 1. try bestvideo+bestaudio with merge
-            # 2. fall back to "best" single file if mux won't work
-            "-f", "bestvideo*+bestaudio/best",
+            # more forgiving format fallback as dictated by the selected
+            # resolution (defaults to best non-4K).
+            "-f",
+            format_selector,
 
             # merge/remux to mp4 if needed
             "--merge-output-format", extension,
