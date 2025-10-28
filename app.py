@@ -234,30 +234,6 @@ def build_movie_stem(movie: Dict) -> str:
     return cleaned or "Movie"
 
 
-def build_best_format_preferences(extension: str) -> List[Tuple[str, str]]:
-    """Return ordered yt-dlp format selector/sorting preferences for best quality."""
-
-    normalized_extension = (extension or "mp4").strip().lower()
-
-    base_sort = "res,codec:av1,codec:vp9,codec:hevc,codec:h264,acodec:opus,acodec:m4a"
-    attempts: List[Tuple[str, str]] = []
-
-    if normalized_extension == "mp4":
-        # First, try to fetch the absolute best streams even if they are not MP4
-        # compatible. This allows WebM/Opus 4K streams to be downloaded when
-        # available, falling back to MP4-compatible variants only when
-        # necessary.
-        attempts.append(("bv*+ba/bv*[ext=mp4]+ba[ext=m4a]/b", f"{base_sort},ext:mp4:m4a"))
-        # If muxing fails (e.g., due to codec/container incompatibilities),
-        # retry using the previous MP4-only preference to maintain backwards
-        # compatibility.
-        attempts.append(("bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b", f"{base_sort},ext:mp4:m4a"))
-    else:
-        attempts.append(("bv*+ba/b", f"{base_sort},ext:mkv,ext:webm,ext:mp4:m4a"))
-
-    return attempts
-
-
 def resolve_movie_by_metadata(
     movie_id: str,
     tmdb: str,
@@ -586,8 +562,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         target_template = os.path.join(target_dir, f"{filename_base}.%(ext)s")
         target_path = os.path.join(target_dir, filename)
 
-        format_attempts = build_best_format_preferences(extension)
-
         if shutil.which("ffmpeg") is None:
             warn(
                 "ffmpeg executable not found; yt-dlp may fall back to a lower quality progressive stream."
@@ -596,11 +570,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         base_command_prefix = [
             "yt-dlp",
             "--newline",
-
-            # merge/remux to the requested extension when possible
-            "--merge-output-format",
-            extension,
-
             # pretend to be an Android Chrome client YouTube still feeds without as much friction
             "--user-agent",
             "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
@@ -623,14 +592,18 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         _job_status(job_id, "processing", progress=20)
 
         progress_pattern = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
-        download_success = False
-        failure_summary = "Download failed."
+        command = base_command_prefix + base_command_suffix
 
-        for attempt_index, (format_selector, format_sort) in enumerate(
-            format_attempts, start=1
-        ):
-            log(
-                f"Attempt {attempt_index}: requesting yt-dlp formats with selector '{format_selector}' sorted by '{format_sort}'."
+        log("Running yt-dlp with automatic best-quality selection.")
+
+        output_lines: List[str] = []
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
             )
 
             command = (
@@ -681,7 +654,10 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 f"yt-dlp exited with code {return_code} while using selector '{format_selector}'."
             )
 
-            # Clean up any partial files before retrying with the fallback selector.
+        if return_code != 0:
+            failure_summary = output_lines[-1] if output_lines else "Download failed."
+            log(f"yt-dlp exited with code {return_code}.")
+
             leftover_pattern = os.path.join(target_dir, f"{filename_base}.*")
             for leftover in glob.glob(leftover_pattern):
                 if leftover.endswith(".part") or leftover.endswith(".ytdl"):
@@ -690,7 +666,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     except OSError:
                         continue
 
-        if not download_success:
             fail(f"Download failed: {failure_summary[:300]}")
             return
 
@@ -710,9 +685,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         if actual_extension != extension:
             log(
-                "Detected output extension '%s' differing from requested '%s'; using actual extension.",
-                actual_extension,
-                extension,
+                f"Detected output extension '{actual_extension}' differing from requested '{extension}'; using actual extension."
             )
         if actual_extension != requested_extension:
             job_snapshot = jobs_repo.get(job_id)
