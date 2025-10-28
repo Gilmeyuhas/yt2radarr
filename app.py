@@ -509,6 +509,9 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         movie_stem = build_movie_stem(movie)
         log(f"Resolved Radarr movie stem to '{movie_stem}'.")
 
+        canonical_filename = f"{movie_stem}.{extension}"
+        canonical_path = os.path.join(target_dir, canonical_filename)
+
         if extra:
             extra_label = sanitize_filename(extra_name) or "Extra"
             log(f"Using extra label '{extra_label}'.")
@@ -600,8 +603,23 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             fail(f"Download failed: {summary[:300]}")
             return
 
+        try:
+            if os.path.abspath(target_path) != os.path.abspath(canonical_path):
+                log(
+                    f"Renaming downloaded file to canonical name '{canonical_filename}'."
+                )
+                os.replace(target_path, canonical_path)
+                target_path = canonical_path
+            else:
+                log("Download already matches canonical filename.")
+        except Exception as exc:
+            fail(
+                f"Failed to rename downloaded file to '{canonical_filename}': {exc}"
+            )
+            return
+
         _job_status(job_id, "processing", progress=100)
-        log(f"Success! Video downloaded to '{target_path}'.")
+        log(f"Success! Video saved as '{target_path}'.")
         _mark_job_success(job_id)
     except Exception as exc:  # pragma: no cover - unexpected failure
         fail(f"Unexpected error: {exc}")
