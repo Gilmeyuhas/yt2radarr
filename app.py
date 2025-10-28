@@ -214,6 +214,24 @@ def sanitize_filename(name: str) -> str:
     return sanitized.strip().rstrip('.')
 
 
+def build_movie_stem(movie: Dict) -> str:
+    """Return the canonical movie stem ``Title (Year) {tmdb-ID}``."""
+
+    title = str(movie.get("title") or "Movie").strip()
+    year = str(movie.get("year") or "").strip()
+    tmdb_id = str(movie.get("tmdbId") or "").strip()
+
+    parts = [title]
+    if year:
+        parts.append(f"({year})")
+    if tmdb_id:
+        parts.append(f"{{tmdb-{tmdb_id}}}")
+
+    stem = " ".join(parts)
+    cleaned = sanitize_filename(stem)
+    return cleaned or "Movie"
+
+
 def build_format_selector(resolution: str) -> str:
     """Return a yt-dlp format selector for the requested resolution."""
     mapping = {
@@ -488,42 +506,17 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         else:
             log("Storing video alongside primary movie files.")
 
-        descriptive = extra_name
-        if descriptive:
-            log(f"Using custom descriptive name '{descriptive}'.")
-        else:
-            try:
-                log("Querying yt-dlp for video title.")
-                yt_cmd = [
-                    "yt-dlp",
-                    "--get-title",
-                    "--user-agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
-                    "--extractor-args", "youtube:player_client=android",
-                    "--referer", yt_url,
-                ]
-                if COOKIE_PATH:
-                    yt_cmd += ["--cookies", COOKIE_PATH]
-                yt_cmd.append(yt_url)
-                proc = subprocess.run(
-                    yt_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                descriptive = proc.stdout.strip() or "Video"
-                log(f"Using YouTube title '{descriptive}'.")
-            except Exception as exc:  # pragma: no cover - command failure
-                descriptive = "Video"
-                warn(
-                    f"Failed to retrieve title from yt-dlp ({exc}). Using fallback name 'Video'."
-                )
-
-        descriptive = sanitize_filename(descriptive)
+        movie_stem = build_movie_stem(movie)
+        log(f"Resolved Radarr movie stem to '{movie_stem}'.")
 
         if extra:
-            filename = f"{descriptive}.{extension}"
+            extra_label = sanitize_filename(extra_name) or "Extra"
+            log(f"Using extra label '{extra_label}'.")
+            file_stem = f"{movie_stem} {extra_label}"
         else:
-            filename = f"{descriptive}-{extra_type}.{extension}"
+            file_stem = movie_stem
+
+        filename = f"{file_stem}.{extension}"
 
         target_path = os.path.join(target_dir, filename)
         if os.path.exists(target_path):
@@ -531,14 +524,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             log(f"File '{filename}' already exists. Searching for a free filename.")
             index = 1
             while True:
-                if extra:
-                    new_filename = f"{base_name} ({index}){ext_part}"
-                else:
-                    if base_name.endswith(f"-{extra_type}"):
-                        base_descr = base_name[: -len(f"-{extra_type}")]
-                    else:
-                        base_descr = base_name
-                    new_filename = f"{base_descr} ({index})-{extra_type}{ext_part}"
+                new_filename = f"{base_name} ({index}){ext_part}"
                 candidate = os.path.join(target_dir, new_filename)
                 if not os.path.exists(candidate):
                     target_path = candidate
