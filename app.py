@@ -494,7 +494,12 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         else:
             try:
                 log("Querying yt-dlp for video title.")
-                yt_cmd = ["yt-dlp", "--get-title"]
+                yt_cmd = [
+                    "yt-dlp",
+                    "--get-title",
+                    "--user-agent",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                ]
                 if COOKIE_PATH:
                     yt_cmd += ["--cookies", COOKIE_PATH]
                 yt_cmd.append(yt_url)
@@ -544,10 +549,10 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         command = [
             "yt-dlp",
             "--newline",
-            "-f",
-            format_selector,
-            "--merge-output-format",
-            extension,
+            "-f", format_selector,
+            "--merge-output-format", extension,
+            "--user-agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
         ]
         if COOKIE_PATH:
             command += ["--cookies", COOKIE_PATH]
