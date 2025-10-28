@@ -514,26 +514,49 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     f"Failed to retrieve title from yt-dlp ({exc}). Using fallback name 'Video'."
                 )
 
+        descriptive = sanitize_filename(descriptive) or "Video"
+
+        if extra:
+            extra_suffix = sanitize_filename(extra_name) or extra_type
+            if extra_suffix:
+                filename_base = f"{descriptive}-{extra_suffix}"
+            else:
+                filename_base = descriptive
+        else:
+            filename_base = descriptive
+
+        filename_base = filename_base or "Video"
+        pattern = os.path.join(target_dir, f"{filename_base}.*")
+        if any(os.path.exists(path) for path in glob.glob(pattern)):
+            log(f"File stem '{filename_base}' already exists. Searching for a free filename.")
+            index = 1
+            while True:
+                candidate_base = f"{filename_base} ({index})"
+                candidate_pattern = os.path.join(target_dir, f"{candidate_base}.*")
+                if not any(os.path.exists(path) for path in glob.glob(candidate_pattern)):
+                    filename_base = candidate_base
+                    log(f"Selected new filename stem '{filename_base}'.")
+                    break
+                index += 1
+
+        template_base = filename_base.replace("%", "%%")
+        target_template = os.path.join(target_dir, f"{template_base}.%(ext)s")
+        expected_pattern = os.path.join(target_dir, f"{filename_base}.*")
+
         if shutil.which("ffmpeg") is None:
             warn(
                 "ffmpeg executable not found; yt-dlp may fall back to a lower quality progressive stream."
             )
 
-        _job_status(job_id, "processing", progress=20)
-
-        existing_files = {
-            os.path.join(target_dir, entry)
-            for entry in os.listdir(target_dir)
-        }
-        start_time = time.time()
-
         progress_pattern = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
         command = ["yt-dlp"]
         if COOKIE_PATH:
             command += ["--cookies", COOKIE_PATH]
-        command.append(yt_url)
+        command += ["-o", target_template, yt_url]
 
-        log("Running yt-dlp with minimal invocation.")
+        log("Running yt-dlp with explicit output template.")
+
+        _job_status(job_id, "processing", progress=20)
 
         output_lines: List[str] = []
         try:
@@ -565,22 +588,11 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     return
                 _job_status(job_id, "processing", progress=progress_value)
 
-        buffer = ""
-        while True:
-            chunk = process.stdout.read(1)
-            if chunk == "":
-                if process.poll() is not None:
-                    if buffer:
-                        handle_output_line(buffer)
-                        buffer = ""
-                    break
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if not line:
                 continue
-            if chunk in {"\n", "\r"}:
-                if buffer:
-                    handle_output_line(buffer)
-                    buffer = ""
-                continue
-            buffer += chunk
+            handle_output_line(line)
 
         process.stdout.close()
         return_code = process.wait()
@@ -589,31 +601,21 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             failure_summary = output_lines[-1] if output_lines else "Download failed."
             log(f"yt-dlp exited with code {return_code}.")
 
-            for entry in os.listdir(target_dir):
-                candidate = os.path.join(target_dir, entry)
-                if not os.path.isfile(candidate):
-                    continue
-                if candidate in existing_files:
-                    continue
-                if not (entry.endswith(".part") or entry.endswith(".ytdl")):
-                    continue
-                try:
-                    os.remove(candidate)
-                except OSError:
-                    continue
+            for leftover in glob.glob(expected_pattern):
+                if leftover.endswith(".part") or leftover.endswith(".ytdl"):
+                    try:
+                        os.remove(leftover)
+                    except OSError:
+                        continue
 
             fail(f"Download failed: {failure_summary[:300]}")
             return
 
-        downloaded_candidates: List[str] = []
-        for entry in os.listdir(target_dir):
-            candidate = os.path.join(target_dir, entry)
-            if not os.path.isfile(candidate):
-                continue
-            if entry.endswith(".part") or entry.endswith(".ytdl"):
-                continue
-            if candidate not in existing_files or os.path.getmtime(candidate) >= start_time:
-                downloaded_candidates.append(candidate)
+        downloaded_candidates = [
+            path
+            for path in glob.glob(expected_pattern)
+            if os.path.isfile(path) and not path.endswith((".part", ".ytdl"))
+        ]
 
         if not downloaded_candidates:
             fail("Download completed but the output file could not be located.")
