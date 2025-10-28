@@ -559,7 +559,16 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     break
                 index += 1
 
-        target_template = os.path.join(target_dir, f"{filename_base}.%(ext)s")
+        # ``yt-dlp`` treats ``-o`` arguments as templates using ``%(field)s``
+        # placeholders. If the filename stem itself contains ``%`` characters
+        # (which is common for titles like ``100% Fun``) the template must
+        # escape them as ``%%`` or yt-dlp will attempt to treat them as
+        # formatting tokens and abort.  The canonical filename should still
+        # contain the literal ``%`` once the download is complete, so only the
+        # template string is escaped here.
+        template_base = filename_base.replace("%", "%%")
+
+        target_template = os.path.join(target_dir, f"{template_base}.%(ext)s")
         target_path = os.path.join(target_dir, filename)
 
         if shutil.which("ffmpeg") is None:
