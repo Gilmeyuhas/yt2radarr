@@ -558,9 +558,13 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         descriptive = sanitize_filename(descriptive)
 
         if extra:
-            filename = f"{descriptive}.{extension}"
+            extra_suffix = sanitize_filename(extra_name) or extra_type
+            if extra_suffix:
+                filename = f"{descriptive}-{extra_suffix}.{extension}"
+            else:
+                filename = f"{descriptive}.{extension}"
         else:
-            filename = f"{descriptive}-{extra_type}.{extension}"
+            filename = f"{descriptive}.{extension}"
 
         target_path = os.path.join(target_dir, filename)
         if os.path.exists(target_path):
