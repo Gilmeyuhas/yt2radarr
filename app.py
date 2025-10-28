@@ -233,14 +233,27 @@ def build_movie_stem(movie: Dict) -> str:
 
 
 def build_format_selector(resolution: str) -> str:
-    """Return a yt-dlp format selector for the requested resolution."""
+    """Return a yt-dlp format selector for the requested resolution.
+
+    The "best" selector intentionally caps the height below 2160p so that we
+    avoid downloading 4K assets but still fetch the highest quality available
+    below that ceiling. Each selector includes progressively more permissive
+    fallbacks so that yt-dlp can still retrieve a file if a muxable
+    bestvideo+bestaudio combination is unavailable.
+    """
+
+    best_non_4k = (
+        "bestvideo[height<2160]+bestaudio/best[height<2160]/"
+        "best[height<2160]/best"
+    )
+
     mapping = {
-        "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-        "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]",
-        "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]",
-        "best": "bestvideo+bestaudio/best",
+        "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best[height<=1080]/best",
+        "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]/best[height<=720]/best",
+        "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]/best[height<=480]/best",
+        "best": best_non_4k,
     }
-    return mapping.get(resolution, mapping["best"])
+    return mapping.get(resolution, best_non_4k)
 
 
 def resolve_movie_by_metadata(
@@ -585,10 +598,10 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             "yt-dlp",
             "--newline",
 
-            # more forgiving format fallback:
-            # 1. try bestvideo+bestaudio with merge
-            # 2. fall back to "best" single file if mux won't work
-            "-f", "bestvideo*+bestaudio/best",
+            # more forgiving format fallback as dictated by the selected
+            # resolution (defaults to best non-4K).
+            "-f",
+            format_selector,
 
             # merge/remux to mp4 if needed
             "--merge-output-format", extension,
