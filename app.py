@@ -496,12 +496,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 yt_cmd = [
                     "yt-dlp",
                     "--get-title",
-                    "--user-agent",
-                    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
-                    "--extractor-args",
-                    "youtube:player_client=android",
-                    "--referer",
-                    yt_url,
                 ]
                 if COOKIE_PATH:
                     yt_cmd += ["--cookies", COOKIE_PATH]
