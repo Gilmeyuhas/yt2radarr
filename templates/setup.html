@@ -3,16 +3,31 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Initial Setup - Radarr YouTube Video Importer</title>
+  <title>Initial Setup - YT2Radarr - Radarr YouTube Video Importer</title>
+  <link
+    rel="icon"
+    type="image/svg+xml"
+    sizes="any"
+    href="{{ url_for('static', filename='yt2radarr-logo.svg') }}"
+  />
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
 </head>
 <body>
   <div class="app-shell">
     <div class="header">
-      <h1>Radarr YouTube Video Importer</h1>
-      {% if configured %}
-        <a class="link-button" href="{{ url_for('index') }}">Back to App</a>
-      {% endif %}
+      <div class="brand">
+        <img
+          src="{{ url_for('static', filename='yt2radarr-logo.svg') }}"
+          alt="YT2Radarr logo"
+          class="app-logo"
+        />
+        <h1>YT2Radarr - Radarr YouTube Video Importer</h1>
+      </div>
+      <div class="header-actions">
+        {% if configured %}
+          <a class="link-button" href="{{ url_for('index') }}">Back to App</a>
+        {% endif %}
+      </div>
     </div>
 
     <div class="page-layout">

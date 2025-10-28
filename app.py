@@ -235,25 +235,39 @@ def build_movie_stem(movie: Dict) -> str:
 def build_format_selector(resolution: str) -> str:
     """Return a yt-dlp format selector for the requested resolution.
 
-    The "best" selector intentionally caps the height below 2160p so that we
-    avoid downloading 4K assets but still fetch the highest quality available
-    below that ceiling. Each selector includes progressively more permissive
-    fallbacks so that yt-dlp can still retrieve a file if a muxable
-    bestvideo+bestaudio combination is unavailable.
+    The selector prioritises the highest fidelity stream below 4K, including
+    muxed video+audio variants and progressively broader fallbacks so downloads
+    still succeed when ideal streams are missing. Dedicated resolution requests
+    also inherit the non-4K fallback to make sure we do not inadvertently grab
+    a lower tier (for example, 360p) when higher quality is available.
     """
 
-    best_non_4k = (
-        "bestvideo[height<2160]+bestaudio/best[height<2160]/"
-        "best[height<2160]/best"
+    def join_formats(*candidates: str) -> str:
+        return "/".join([candidate for candidate in candidates if candidate])
+
+    best_non_4k = join_formats(
+        "bv*[height<2160]+ba",
+        "bv*[height<2160]",
+        "b[height<2160]",
     )
 
-    mapping = {
-        "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best[height<=1080]/best",
-        "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]/best[height<=720]/best",
-        "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]/best[height<=480]/best",
-        "best": best_non_4k,
+    resolution = (resolution or "best").strip().lower()
+    height_limits = {
+        "1080p": 1080,
+        "720p": 720,
+        "480p": 480,
     }
-    return mapping.get(resolution, best_non_4k)
+
+    limit = height_limits.get(resolution)
+    if limit is not None:
+        limited_selector = join_formats(
+            f"bv*[height<={limit}]+ba",
+            f"bv*[height<={limit}]",
+            f"b[height<={limit}]",
+        )
+        return join_formats(limited_selector, best_non_4k, "best")
+
+    return join_formats(best_non_4k, "best")
 
 
 def resolve_movie_by_metadata(
@@ -336,8 +350,6 @@ def index():
     movies = get_all_movies()
     config = load_config()
     return render_template("index.html", movies=movies, configured=is_configured(config))
-
-
 @app.route("/create", methods=["POST"])
 def create():
     config = load_config()
