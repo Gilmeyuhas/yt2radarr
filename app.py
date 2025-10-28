@@ -630,10 +630,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             format_attempts, start=1
         ):
             log(
-                "Attempt %d: requesting yt-dlp formats with selector '%s' sorted by '%s'.",
-                attempt_index,
-                format_selector,
-                format_sort,
+                f"Attempt {attempt_index}: requesting yt-dlp formats with selector '{format_selector}' sorted by '{format_sort}'."
             )
 
             command = (
@@ -681,9 +678,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
             failure_summary = output_lines[-1] if output_lines else failure_summary
             log(
-                "yt-dlp exited with code %s while using selector '%s'.",
-                return_code,
-                format_selector,
+                f"yt-dlp exited with code {return_code} while using selector '{format_selector}'."
             )
 
             # Clean up any partial files before retrying with the fallback selector.
