@@ -497,8 +497,9 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 yt_cmd = [
                     "yt-dlp",
                     "--get-title",
-                    "--user-agent",
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                    "--user-agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+                    "--extractor-args", "youtube:player_client=android",
+                    "--referer", yt_url,
                 ]
                 if COOKIE_PATH:
                     yt_cmd += ["--cookies", COOKIE_PATH]
@@ -549,14 +550,29 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         command = [
             "yt-dlp",
             "--newline",
-            "-f", format_selector,
+
+            # more forgiving format fallback:
+            # 1. try bestvideo+bestaudio with merge
+            # 2. fall back to "best" single file if mux won't work
+            "-f", "bestvideo*+bestaudio/best",
+
+            # merge/remux to mp4 if needed
             "--merge-output-format", extension,
-            "--user-agent",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+
+            # pretend to be an Android Chrome client YouTube still feeds without as much friction
+            "--user-agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+            "--extractor-args", "youtube:player_client=android",
+
+            # makes some requests look more like normal watch page navigation
+            "--referer", yt_url,
         ]
         if COOKIE_PATH:
             command += ["--cookies", COOKIE_PATH]
-        command += ["-o", target_path, yt_url]
+
+        command += [
+            "-o", target_path,
+            yt_url,
+        ]
 
         log(f"Running yt-dlp with format '{format_selector}'.")
         _job_status(job_id, "processing", progress=20)
