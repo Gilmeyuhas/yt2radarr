@@ -232,40 +232,6 @@ def build_movie_stem(movie: Dict) -> str:
     return cleaned or "Movie"
 
 
-def build_format_selector(resolution: str) -> str:
-    """Return a yt-dlp format selector for the requested resolution.
-
-    "Best" now requests the highest quality video+audio combination available
-    and falls back to muxed streams as needed. Specific resolution requests
-    prioritise streams up to the requested height before conceding to the best
-    available alternative so downloads still succeed when ideal streams are
-    missing.
-    """
-
-    def join_formats(*candidates: str) -> str:
-        return "/".join([candidate for candidate in candidates if candidate])
-
-    best_overall = join_formats("bv*+ba", "b")
-
-    resolution = (resolution or "best").strip().lower()
-    height_limits = {
-        "1080p": 1080,
-        "720p": 720,
-        "480p": 480,
-    }
-
-    limit = height_limits.get(resolution)
-    if limit is not None:
-        limited_selector = join_formats(
-            f"bv*[height<={limit}]+ba",
-            f"bv*[height<={limit}]",
-            f"b[height<={limit}]",
-        )
-        return join_formats(limited_selector, best_overall)
-
-    return best_overall
-
-
 def resolve_movie_by_metadata(
     movie_id: str,
     tmdb: str,
@@ -309,14 +275,6 @@ EXTRA_TYPE_LABELS = {
 }
 
 
-RESOLUTION_LABELS = {
-    "best": "Best Available",
-    "1080p": "Up to 1080p",
-    "720p": "Up to 720p",
-    "480p": "Up to 480p",
-}
-
-
 def _describe_job(payload: Dict) -> Dict:
     movie_label = (payload.get("movieName") or payload.get("title") or "").strip()
     if not movie_label:
@@ -331,11 +289,9 @@ def _describe_job(payload: Dict) -> Dict:
     else:
         label = movie_label
         subtitle = ""
-    resolution = (payload.get("resolution") or "best").strip().lower()
     metadata = [
         "Stored as extra content" if extra else "",
         f"Format: {(payload.get('extension') or 'mp4').strip().upper() or 'MP4'}",
-        f"Resolution: {RESOLUTION_LABELS.get(resolution, resolution or 'Best Available')}",
     ]
     metadata = [item for item in metadata if item]
     return {"label": label or "Radarr Download", "subtitle": subtitle, "metadata": metadata}
@@ -389,7 +345,6 @@ def create():
         "title": (data.get("title") or "").strip(),
         "year": (data.get("year") or "").strip(),
         "tmdb": (data.get("tmdb") or "").strip(),
-        "resolution": (data.get("resolution") or "best").strip().lower(),
         "extension": extension,
         "extra": extra,
         "extraType": (data.get("extraType") or "trailer").strip().lower(),
@@ -477,7 +432,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         extra = bool(payload.get("extra"))
         extra_name = (payload.get("extra_name") or "").strip()
-        resolution = (payload.get("resolution") or "best").strip().lower()
         extension = (payload.get("extension") or "mp4").strip().lower()
 
         try:
@@ -601,15 +555,9 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     break
                 index += 1
 
-        format_selector = build_format_selector(resolution)
         command = [
             "yt-dlp",
             "--newline",
-
-            # more forgiving format fallback as dictated by the selected
-            # resolution (defaults to best non-4K).
-            "-f",
-            format_selector,
 
             # merge/remux to mp4 if needed
             "--merge-output-format", extension,
@@ -629,7 +577,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             yt_url,
         ]
 
-        log(f"Running yt-dlp with format '{format_selector}'.")
+        log("Running yt-dlp with default (best available) format selection.")
         _job_status(job_id, "processing", progress=20)
 
         output_lines: List[str] = []
