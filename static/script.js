@@ -8,7 +8,6 @@ document.addEventListener('DOMContentLoaded', () => {
     titleInput: document.getElementById('title'),
     yearInput: document.getElementById('year'),
     tmdbInput: document.getElementById('tmdb'),
-    extensionSelect: document.getElementById('extension'),
     extraCheckbox: document.getElementById('extra'),
     extraTypeSelect: document.getElementById('extraType'),
     extraFields: document.getElementById('extraFields'),
@@ -412,7 +411,6 @@ document.addEventListener('DOMContentLoaded', () => {
       title: elements.titleInput ? elements.titleInput.value.trim() : '',
       year: elements.yearInput ? elements.yearInput.value.trim() : '',
       tmdb: elements.tmdbInput ? elements.tmdbInput.value.trim() : '',
-      extension: elements.extensionSelect ? elements.extensionSelect.value : 'mp4',
       extra: elements.extraCheckbox ? elements.extraCheckbox.checked : false,
       extraType: elements.extraTypeSelect ? elements.extraTypeSelect.value : 'trailer',
       extra_name: elements.extraNameInput ? elements.extraNameInput.value.trim() : ''
