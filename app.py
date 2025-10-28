@@ -509,17 +509,58 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         movie_stem = build_movie_stem(movie)
         log(f"Resolved Radarr movie stem to '{movie_stem}'.")
 
-        canonical_filename = f"{movie_stem}.{extension}"
+        canonical_stem = movie_stem
+        extra_label = ""
+        if extra:
+            extra_label = sanitize_filename(extra_name) or EXTRA_TYPE_LABELS.get(
+                extra_type, extra_type.capitalize()
+            )
+            if extra_label:
+                canonical_stem = f"{movie_stem} {extra_label}"
+                log(f"Using extra label '{extra_label}'.")
+
+        canonical_filename = f"{canonical_stem}.{extension}"
         canonical_path = os.path.join(target_dir, canonical_filename)
 
-        if extra:
-            extra_label = sanitize_filename(extra_name) or "Extra"
-            log(f"Using extra label '{extra_label}'.")
-            file_stem = f"{movie_stem} {extra_label}"
+        descriptive = extra_name
+        if descriptive:
+            log(f"Using custom descriptive name '{descriptive}'.")
         else:
-            file_stem = movie_stem
+            try:
+                log("Querying yt-dlp for video title.")
+                yt_cmd = [
+                    "yt-dlp",
+                    "--get-title",
+                    "--user-agent",
+                    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+                    "--extractor-args",
+                    "youtube:player_client=android",
+                    "--referer",
+                    yt_url,
+                ]
+                if COOKIE_PATH:
+                    yt_cmd += ["--cookies", COOKIE_PATH]
+                yt_cmd.append(yt_url)
+                proc = subprocess.run(
+                    yt_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                descriptive = proc.stdout.strip() or "Video"
+                log(f"Using YouTube title '{descriptive}'.")
+            except Exception as exc:  # pragma: no cover - command failure
+                descriptive = "Video"
+                warn(
+                    f"Failed to retrieve title from yt-dlp ({exc}). Using fallback name 'Video'."
+                )
 
-        filename = f"{file_stem}.{extension}"
+        descriptive = sanitize_filename(descriptive)
+
+        if extra:
+            filename = f"{descriptive}.{extension}"
+        else:
+            filename = f"{descriptive}-{extra_type}.{extension}"
 
         target_path = os.path.join(target_dir, filename)
         if os.path.exists(target_path):
@@ -602,6 +643,22 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             summary = output_lines[-1] if output_lines else "Download failed."
             fail(f"Download failed: {summary[:300]}")
             return
+
+        if os.path.exists(canonical_path):
+            base_name, ext_part = os.path.splitext(canonical_filename)
+            log(
+                f"Canonical filename '{canonical_filename}' already exists. Searching for a free name."
+            )
+            index = 1
+            while True:
+                new_filename = f"{base_name} ({index}){ext_part}"
+                candidate = os.path.join(target_dir, new_filename)
+                if not os.path.exists(candidate):
+                    canonical_filename = new_filename
+                    canonical_path = candidate
+                    log(f"Selected canonical filename '{new_filename}'.")
+                    break
+                index += 1
 
         try:
             if os.path.abspath(target_path) != os.path.abspath(canonical_path):
