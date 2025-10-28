@@ -215,33 +215,21 @@ def sanitize_filename(name: str) -> str:
 
 
 def build_movie_stem(movie: Dict) -> str:
-    """Return the canonical movie stem ``<Folder Name> {tmdb-ID}``."""
+    """Return the canonical movie stem ``Title (Year) {tmdb-ID}``."""
 
+    title = str(movie.get("title") or "Movie").strip()
+    year = str(movie.get("year") or "").strip()
     tmdb_id = str(movie.get("tmdbId") or "").strip()
 
-    folder_name = str(movie.get("folderName") or "").strip()
-    if not folder_name:
-        raw_path = str(movie.get("path") or "").strip()
-        if raw_path:
-            folder_name = os.path.basename(os.path.normpath(raw_path))
-
-    if folder_name:
-        base_name = folder_name
-    else:
-        title = str(movie.get("title") or "").strip()
-        year = str(movie.get("year") or "").strip()
-        if title and year:
-            base_name = f"{title} ({year})"
-        else:
-            base_name = title or "Movie"
-
-    cleaned_base = sanitize_filename(base_name) or "Movie"
-
-    parts = [cleaned_base]
+    parts = [title]
+    if year:
+        parts.append(f"({year})")
     if tmdb_id:
         parts.append(f"{{tmdb-{tmdb_id}}}")
 
-    return " ".join(parts)
+    stem = " ".join(parts)
+    cleaned = sanitize_filename(stem)
+    return cleaned or "Movie"
 
 
 def build_format_selector(resolution: str) -> str:
