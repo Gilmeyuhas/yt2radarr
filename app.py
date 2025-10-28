@@ -235,21 +235,17 @@ def build_movie_stem(movie: Dict) -> str:
 def build_format_selector(resolution: str) -> str:
     """Return a yt-dlp format selector for the requested resolution.
 
-    The selector prioritises the highest fidelity stream below 4K, including
-    muxed video+audio variants and progressively broader fallbacks so downloads
-    still succeed when ideal streams are missing. Dedicated resolution requests
-    also inherit the non-4K fallback to make sure we do not inadvertently grab
-    a lower tier (for example, 360p) when higher quality is available.
+    "Best" now requests the highest quality video+audio combination available
+    and falls back to muxed streams as needed. Specific resolution requests
+    prioritise streams up to the requested height before conceding to the best
+    available alternative so downloads still succeed when ideal streams are
+    missing.
     """
 
     def join_formats(*candidates: str) -> str:
         return "/".join([candidate for candidate in candidates if candidate])
 
-    best_non_4k = join_formats(
-        "bv*[height<2160]+ba",
-        "bv*[height<2160]",
-        "b[height<2160]",
-    )
+    best_overall = join_formats("bv*+ba", "b")
 
     resolution = (resolution or "best").strip().lower()
     height_limits = {
@@ -265,9 +261,9 @@ def build_format_selector(resolution: str) -> str:
             f"bv*[height<={limit}]",
             f"b[height<={limit}]",
         )
-        return join_formats(limited_selector, best_non_4k, "best")
+        return join_formats(limited_selector, best_overall)
 
-    return join_formats(best_non_4k, "best")
+    return best_overall
 
 
 def resolve_movie_by_metadata(
