@@ -214,6 +214,24 @@ def sanitize_filename(name: str) -> str:
     return sanitized.strip().rstrip('.')
 
 
+def build_movie_stem(movie: Dict) -> str:
+    """Return the canonical movie stem ``Title (Year) {tmdb-ID}``."""
+
+    title = str(movie.get("title") or "Movie").strip()
+    year = str(movie.get("year") or "").strip()
+    tmdb_id = str(movie.get("tmdbId") or "").strip()
+
+    parts = [title]
+    if year:
+        parts.append(f"({year})")
+    if tmdb_id:
+        parts.append(f"{{tmdb-{tmdb_id}}}")
+
+    stem = " ".join(parts)
+    cleaned = sanitize_filename(stem)
+    return cleaned or "Movie"
+
+
 def build_format_selector(resolution: str) -> str:
     """Return a yt-dlp format selector for the requested resolution."""
     mapping = {
@@ -488,6 +506,22 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         else:
             log("Storing video alongside primary movie files.")
 
+        movie_stem = build_movie_stem(movie)
+        log(f"Resolved Radarr movie stem to '{movie_stem}'.")
+
+        canonical_stem = movie_stem
+        extra_label = ""
+        if extra:
+            extra_label = sanitize_filename(extra_name) or EXTRA_TYPE_LABELS.get(
+                extra_type, extra_type.capitalize()
+            )
+            if extra_label:
+                canonical_stem = f"{movie_stem} {extra_label}"
+                log(f"Using extra label '{extra_label}'.")
+
+        canonical_filename = f"{canonical_stem}.{extension}"
+        canonical_path = os.path.join(target_dir, canonical_filename)
+
         descriptive = extra_name
         if descriptive:
             log(f"Using custom descriptive name '{descriptive}'.")
@@ -497,9 +531,12 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 yt_cmd = [
                     "yt-dlp",
                     "--get-title",
-                    "--user-agent", "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
-                    "--extractor-args", "youtube:player_client=android",
-                    "--referer", yt_url,
+                    "--user-agent",
+                    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+                    "--extractor-args",
+                    "youtube:player_client=android",
+                    "--referer",
+                    yt_url,
                 ]
                 if COOKIE_PATH:
                     yt_cmd += ["--cookies", COOKIE_PATH]
@@ -531,14 +568,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             log(f"File '{filename}' already exists. Searching for a free filename.")
             index = 1
             while True:
-                if extra:
-                    new_filename = f"{base_name} ({index}){ext_part}"
-                else:
-                    if base_name.endswith(f"-{extra_type}"):
-                        base_descr = base_name[: -len(f"-{extra_type}")]
-                    else:
-                        base_descr = base_name
-                    new_filename = f"{base_descr} ({index})-{extra_type}{ext_part}"
+                new_filename = f"{base_name} ({index}){ext_part}"
                 candidate = os.path.join(target_dir, new_filename)
                 if not os.path.exists(candidate):
                     target_path = candidate
@@ -614,8 +644,39 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             fail(f"Download failed: {summary[:300]}")
             return
 
+        if os.path.exists(canonical_path):
+            base_name, ext_part = os.path.splitext(canonical_filename)
+            log(
+                f"Canonical filename '{canonical_filename}' already exists. Searching for a free name."
+            )
+            index = 1
+            while True:
+                new_filename = f"{base_name} ({index}){ext_part}"
+                candidate = os.path.join(target_dir, new_filename)
+                if not os.path.exists(candidate):
+                    canonical_filename = new_filename
+                    canonical_path = candidate
+                    log(f"Selected canonical filename '{new_filename}'.")
+                    break
+                index += 1
+
+        try:
+            if os.path.abspath(target_path) != os.path.abspath(canonical_path):
+                log(
+                    f"Renaming downloaded file to canonical name '{canonical_filename}'."
+                )
+                os.replace(target_path, canonical_path)
+                target_path = canonical_path
+            else:
+                log("Download already matches canonical filename.")
+        except Exception as exc:
+            fail(
+                f"Failed to rename downloaded file to '{canonical_filename}': {exc}"
+            )
+            return
+
         _job_status(job_id, "processing", progress=100)
-        log(f"Success! Video downloaded to '{target_path}'.")
+        log(f"Success! Video saved as '{target_path}'.")
         _mark_job_success(job_id)
     except Exception as exc:  # pragma: no cover - unexpected failure
         fail(f"Unexpected error: {exc}")
