@@ -20,6 +20,21 @@ CONFIG_BASE = os.environ.get("YT2RADARR_CONFIG_DIR", os.path.dirname(__file__))
 CONFIG_PATH = os.path.join(CONFIG_BASE, "config.json")
 JOBS_PATH = os.path.join(CONFIG_BASE, "jobs.json")
 
+# Prefer higher bitrate HLS/H.264 streams before falling back to DASH/AV1.
+# YouTube often serves low bitrate AV1 streams as "best", so bias toward
+# muxed or H.264/AAC combinations at the highest available resolution.
+YTDLP_FORMAT_SELECTOR = (
+    "bestvideo[height>=2160][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "bestvideo[height>=1440][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "bestvideo[height>=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "bestvideo[height>=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "bestvideo[height>=2160]+bestaudio/"
+    "bestvideo[height>=1440]+bestaudio/"
+    "bestvideo[height>=1080]+bestaudio/"
+    "bestvideo[height>=720]+bestaudio/"
+    "95/best"
+)
+
 def _default_config() -> Dict:
     return {
         "radarr_url": (os.environ.get("RADARR_URL") or "").rstrip("/"),
@@ -549,10 +564,63 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             )
 
         progress_pattern = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
+        format_selector = YTDLP_FORMAT_SELECTOR
+
+        info_command = ["yt-dlp"]
+        if COOKIE_PATH:
+            info_command += ["--cookies", COOKIE_PATH]
+        info_command += [
+            "-f",
+            format_selector,
+            "--skip-download",
+            "--print",
+            "%(format_id)s\t%(width)s\t%(height)s\t%(vcodec)s\t%(acodec)s\t%(filesize)s\t%(filesize_approx)s",
+            yt_url,
+        ]
+
+        try:
+            info_result = subprocess.run(
+                info_command,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except Exception as exc:  # pragma: no cover - command failure
+            warn(f"Failed to query format details via yt-dlp: {exc}")
+        else:
+            selection_line = ""
+            for raw_line in info_result.stdout.splitlines():
+                stripped = raw_line.strip()
+                if stripped:
+                    selection_line = stripped
+                    break
+            if selection_line:
+                fields = selection_line.split("\t")
+                format_id = fields[0] if len(fields) > 0 and fields[0] != "None" else "unknown"
+                width = fields[1] if len(fields) > 1 and fields[1] not in ("", "None") else "unknown"
+                height = fields[2] if len(fields) > 2 and fields[2] not in ("", "None") else "unknown"
+                vcodec = fields[3] if len(fields) > 3 and fields[3] not in ("", "None") else "unknown"
+                acodec = fields[4] if len(fields) > 4 and fields[4] not in ("", "None") else "unknown"
+                filesize = "unknown"
+                if len(fields) > 5 and fields[5] not in ("", "None", "0"):
+                    filesize = fields[5]
+                elif len(fields) > 6 and fields[6] not in ("", "None", "0"):
+                    filesize = fields[6]
+                resolution = "unknown"
+                if width != "unknown" and height != "unknown":
+                    resolution = f"{width}x{height}"
+                log(
+                    "Resolved YouTube format: "
+                    f"id={format_id}, resolution={resolution}, video_codec={vcodec}, "
+                    f"audio_codec={acodec}, filesize={filesize}"
+                )
+            else:
+                log("yt-dlp did not report a resolved format; proceeding with download.")
+
         command = ["yt-dlp"]
         if COOKIE_PATH:
             command += ["--cookies", COOKIE_PATH]
-        command += ["-o", target_template, yt_url]
+        command += ["-f", format_selector, "-o", target_template, yt_url]
 
         log("Running yt-dlp with explicit output template.")
 
