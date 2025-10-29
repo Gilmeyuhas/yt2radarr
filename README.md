@@ -65,6 +65,9 @@ services:
       # - ${COOKIE_FILE_PATH:-./cookies/cookies.txt}:/config/cookies.txt:ro
 ```
 
+> [!WARNING]
+> Do not commit config.json, jobs.json, or cookies.txt. These can contain credentials.
+
 Bring it up with:
 ```bash
 docker compose up --build

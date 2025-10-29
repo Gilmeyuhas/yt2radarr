@@ -1,1 +1,14 @@
+# yt2radarr runtime state
+config.json
 jobs.json
+cookies.txt
+.config/
+config/
+
+# python noise
+__pycache__/
+*.pyc
+
+# local env files
+.env
+
