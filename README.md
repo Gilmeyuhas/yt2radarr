@@ -4,6 +4,8 @@ A web UI that turns any publicly accessible YouTube video into a Radarr-ready mo
 
 > Built purely as a hobby project by [Gil Meyuhas](https://github.com/Gilmeyuhas) to make managing a personal media library easier. If you want to help improve it, please open an issue or pull request. Community contributions are more than welcome!
 
+![Screenshot of the YT2Radarr dashboard](static/yt2radarr-dashboard.png)
+
 ## ✨ What it does
 
 * Fetches your entire Radarr library so you can attach a download to the exact title (including extras such as trailers or behind-the-scenes clips).
