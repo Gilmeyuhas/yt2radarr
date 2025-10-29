@@ -784,12 +784,25 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             if os.path.isfile(path) and not path.endswith((".part", ".ytdl"))
         ]
 
+        def _is_intermediate_file(name: str) -> bool:
+            base = os.path.basename(name)
+            if base.endswith(".temp") or ".temp." in base:
+                return True
+            return bool(re.search(r"\.f\d+\.\w+$", base))
+
         if not downloaded_candidates:
             fail("Download completed but the output file could not be located.")
             return
 
-        downloaded_candidates.sort(key=os.path.getmtime, reverse=True)
-        target_path = downloaded_candidates[0]
+        final_candidates = [
+            path for path in downloaded_candidates if not _is_intermediate_file(path)
+        ]
+
+        if final_candidates:
+            target_path = max(final_candidates, key=os.path.getmtime)
+        else:
+            downloaded_candidates.sort(key=os.path.getmtime, reverse=True)
+            target_path = downloaded_candidates[0]
         actual_extension = os.path.splitext(target_path)[1].lstrip(".").lower()
 
         job_snapshot = jobs_repo.get(job_id)
@@ -864,6 +877,16 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 f"Failed to rename downloaded file to '{canonical_filename}': {exc}"
             )
             return
+
+        for leftover in downloaded_candidates:
+            if os.path.abspath(leftover) == os.path.abspath(target_path):
+                continue
+            if not _is_intermediate_file(leftover):
+                continue
+            try:
+                os.remove(leftover)
+            except OSError:
+                continue
 
         _job_status(job_id, "processing", progress=100)
         log(f"Success! Video saved as '{target_path}'.")
