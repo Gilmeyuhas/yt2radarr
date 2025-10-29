@@ -153,6 +153,8 @@ class JobRepository:
             return record.to_dict(include_logs=True)
 
     def list(self, *, include_logs: bool = False) -> List[Dict]:
+        """Return known jobs sorted by creation time."""
+
         with self._lock:
             self._ensure_loaded()
             items = [record.to_dict(include_logs=include_logs) for record in self._cache]
@@ -160,6 +162,8 @@ class JobRepository:
         return items
 
     def get(self, job_id: str, *, include_logs: bool = False) -> Optional[Dict]:
+        """Return a single job as a dictionary if it exists."""
+
         with self._lock:
             self._ensure_loaded()
             record = self._find_locked(job_id)
@@ -168,6 +172,8 @@ class JobRepository:
             return record.to_dict(include_logs=include_logs)
 
     def update(self, job_id: str, updates: Dict) -> Optional[Dict]:
+        """Apply updates to a job and return the refreshed payload."""
+
         with self._lock:
             self._ensure_loaded()
             record = self._find_locked(job_id)
@@ -201,6 +207,8 @@ class JobRepository:
             return record.to_dict(include_logs=True)
 
     def append_logs(self, job_id: str, messages: Iterable[str]) -> None:
+        """Add log entries to a job, trimming history when needed."""
+
         payload = [str(message) for message in messages]
         if not payload:
             return
@@ -215,6 +223,8 @@ class JobRepository:
             self._touch_locked(record)
 
     def replace_last_log(self, job_id: str, message: str) -> None:
+        """Overwrite the most recent log entry for the job."""
+
         text = str(message)
         with self._lock:
             self._ensure_loaded()
@@ -228,6 +238,8 @@ class JobRepository:
             self._touch_locked(record)
 
     def mark_failure(self, job_id: str, message: str) -> Optional[Dict]:
+        """Flag a job as failed and record its completion."""
+
         return self.update(
             job_id,
             {
@@ -239,6 +251,8 @@ class JobRepository:
         )
 
     def mark_success(self, job_id: str) -> Optional[Dict]:
+        """Mark a job as successfully completed."""
+
         return self.update(
             job_id,
             {
@@ -249,7 +263,11 @@ class JobRepository:
             },
         )
 
-    def status(self, job_id: str, status: str, *, progress: Optional[float] = None) -> Optional[Dict]:
+    def status(
+        self, job_id: str, status: str, *, progress: Optional[float] = None
+    ) -> Optional[Dict]:
+        """Convenience helper to update status/progress fields."""
+
         updates: Dict = {"status": status}
         if status == "processing":
             updates.setdefault("started_at", now_iso())
