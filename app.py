@@ -891,6 +891,20 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         output_lines: List[str] = []
         progress_log_active = False
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                cwd=target_dir,
+            )
+        except (OSError, ValueError) as exc:  # pragma: no cover - command failure
+            fail(f"Failed to invoke yt-dlp: {exc}")
+            return
+
+        assert process.stdout is not None
 
         debug_prefixes = (
             "[debug]",
