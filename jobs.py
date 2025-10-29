@@ -214,6 +214,19 @@ class JobRepository:
                 record.logs = record.logs[-self._max_logs :]
             self._touch_locked(record)
 
+    def replace_last_log(self, job_id: str, message: str) -> None:
+        text = str(message)
+        with self._lock:
+            self._ensure_loaded()
+            record = self._find_locked(job_id)
+            if record is None:
+                return
+            if record.logs:
+                record.logs[-1] = text
+            else:
+                record.logs.append(text)
+            self._touch_locked(record)
+
     def mark_failure(self, job_id: str, message: str) -> Optional[Dict]:
         return self.update(
             job_id,
