@@ -4,6 +4,8 @@ A web UI that turns any publicly accessible YouTube video into a Radarr-ready mo
 
 > Built purely as a hobby project by [Gil Meyuhas](https://github.com/Gilmeyuhas) to make managing a personal media library easier. If you want to help improve it, please open an issue or pull request. Community contributions are more than welcome!
 
+![Screenshot of the YT2Radarr dashboard](static/yt2radarr-dashboard.png)
+
 ## ✨ What it does
 
 * Fetches your entire Radarr library so you can attach a download to the exact title (including extras such as trailers or behind-the-scenes clips).
@@ -104,6 +106,8 @@ Everything about the Compose file is customizable - swap ports, change mount poi
 
 ## 🤝 Contributing
 This project exists to scratch my own itch, but it’s open-source because others might find it useful too. Issues, feature ideas, documentation tweaks, puns, and pull requests are all encouraged. If you build something neat, please share it!
+
+### Made with love, ChatGPT, and a deep hatred of manual labour by Gil Meyuhas.
 
 ## 📄 License
 MIT
