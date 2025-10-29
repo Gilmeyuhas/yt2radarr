@@ -1,3 +1,4 @@
+import glob
 import json
 import os
 import re
@@ -74,6 +75,10 @@ jobs_repo = JobRepository(JOBS_PATH, max_items=50)
 
 def append_job_log(job_id: str, message: str) -> None:
     jobs_repo.append_logs(job_id, [message])
+
+
+def replace_job_log(job_id: str, message: str) -> None:
+    jobs_repo.replace_last_log(job_id, message)
 
 
 def _mark_job_failure(job_id: str, message: str) -> None:
@@ -707,6 +712,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         _job_status(job_id, "processing", progress=20)
 
         output_lines: List[str] = []
+        progress_log_active = False
         try:
             process = subprocess.Popen(
                 command,
@@ -723,18 +729,28 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         assert process.stdout is not None
 
         def handle_output_line(text: str) -> None:
+            nonlocal progress_log_active
+
             line = text.strip()
             if not line:
                 return
             output_lines.append(line)
-            log(line)
             match = progress_pattern.search(line)
             if match:
                 try:
                     progress_value = float(match.group(1))
                 except (TypeError, ValueError):
+                    progress_value = None
+                if progress_value is not None:
+                    _job_status(job_id, "processing", progress=progress_value)
+                if line.startswith("[download]"):
+                    if not progress_log_active:
+                        append_job_log(job_id, line)
+                        progress_log_active = True
+                    else:
+                        replace_job_log(job_id, line)
                     return
-                _job_status(job_id, "processing", progress=progress_value)
+            log(line)
 
         for raw_line in process.stdout:
             line = raw_line.rstrip()
