@@ -119,6 +119,58 @@
             </div>
           </div>
 
+          <div class="form-section">
+            <h2>YouTube Cookies (Optional)</h2>
+            <p class="section-description">
+              Paste a Netscape-format cookies file if the videos you save require a logged-in YouTube session. We store it inside
+              the application’s configuration directory so it works anywhere you deploy the app.
+            </p>
+
+            {% if cookie_env_path %}
+              <div class="form-note">
+                <strong>Environment override:</strong> You have <code>YT_COOKIE_FILE</code> set to
+                <code>{{ cookie_env_path }}</code>. That path always takes priority over the saved cookies below.
+              </div>
+            {% endif %}
+
+            {% if resolved_cookie_path %}
+              <div class="form-note">
+                <strong>Active cookies:</strong> Using <code>{{ resolved_cookie_path }}</code> for yt-dlp requests.
+              </div>
+            {% endif %}
+
+            <div class="form-group">
+              <label for="cookie_text">Paste Cookies</label>
+              <textarea
+                id="cookie_text"
+                name="cookie_text"
+                placeholder="# Netscape HTTP Cookie File"
+                rows="6"
+              >{{ cookie_preview }}</textarea>
+            </div>
+
+            <div class="form-note">
+              Generate this text with <code>yt-dlp --cookies-from-browser chrome</code> or export from your browser, then paste it here.
+              We save it as <code>cookies.txt</code> under your chosen configuration directory with owner-only permissions so it stays private on the host.
+            </div>
+
+            <div class="form-check">
+              <input type="checkbox" id="clear_cookies" name="clear_cookies" value="1" />
+              <label for="clear_cookies">Remove saved cookies</label>
+            </div>
+          </div>
+
+          <div class="form-section community-section">
+            <h2>Community</h2>
+            <p class="section-description">
+              Made with love, ChatGPT, &amp; a deep hatred of manual labour by
+              <a href="https://github.com/Gilmeyuhas" target="_blank" rel="noopener">Gil Meyuhas</a>.
+            </p>
+            <p class="form-note">
+              This project is a personal hobby to simplify managing my own media library. If you have ideas or want to help, feel free to open an issue or send a pull request—contributions are very welcome!
+            </p>
+          </div>
+
           <button type="submit">Save Configuration</button>
         </form>
       </div>

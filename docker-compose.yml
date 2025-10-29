@@ -7,10 +7,16 @@ services:
       dockerfile: Dockerfile
     container_name: yt2radarr
     restart: unless-stopped
-
     ports:
-      - "5010:5000"
+      - "${YT2RADARR_PORT:-5010}:5000"
+    environment:
+      RADARR_URL: ${RADARR_URL:-http://radarr:7878}
+      RADARR_API_KEY: ${RADARR_API_KEY}
+      YT2RADARR_CONFIG_DIR: /config
+      # Uncomment to force a specific cookies file path inside the container
+      # YT_COOKIE_FILE: /config/cookies.txt
     volumes:
-      - /Users/gil/Downloads/test:/Movies
-      - "${HOME}/Library/Application Support/Google/Chrome/Default:/root/.config/google-chrome/Default:ro"
-
+      - ./config:/config
+      - ${MOVIES_PATH:-/path/to/movies}:/movies
+      # Optional cookies mount (commented out by default)
+      # - ${COOKIE_FILE_PATH:-./cookies/cookies.txt}:/config/cookies.txt:ro
