@@ -26,7 +26,7 @@ def now_iso() -> str:
 
 
 @dataclass
-class JobRecord:
+class JobRecord:  # pylint: disable=too-many-instance-attributes
     """Dataclass representing a single job entry stored on disk."""
 
     id: str
@@ -85,7 +85,7 @@ class JobRecord:
         return cls(**kwargs)
 
 
-class JobRepository:
+class JobRepository:  # pylint: disable=too-many-instance-attributes
     """Thread-safe JSON-backed job repository."""
 
     def __init__(self, path: str, *, max_items: int = 50, max_logs: int = 200) -> None:
@@ -107,7 +107,7 @@ class JobRepository:
                 raw = json.load(handle)
         except FileNotFoundError:
             raw = []
-        except Exception as exc:  # pragma: no cover - disk corruption
+        except (OSError, json.JSONDecodeError) as exc:  # pragma: no cover - disk issues
             print(f"Failed to load job history: {exc}")
             raw = []
         self._cache = [JobRecord.from_dict(entry) for entry in raw if isinstance(entry, dict)]
@@ -185,7 +185,9 @@ class JobRepository:
                     progress_value = float(progress)
                 except (TypeError, ValueError):
                     progress_value = record.progress
-                record.progress = max(record.progress, max(0.0, min(100.0, progress_value)))
+                record.progress = max(
+                    record.progress, 0.0, min(100.0, progress_value)
+                )
             if "status" in updates:
                 record.status = str(updates["status"]) or record.status
             if "label" in updates and updates["label"]:
