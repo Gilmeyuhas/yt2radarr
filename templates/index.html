@@ -12,7 +12,7 @@
   />
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
 </head>
-<body>
+<body data-debug-mode="{{ 'true' if debug_mode else 'false' }}">
   <div class="app-shell">
     <div class="header">
       <div class="brand">
@@ -139,7 +139,10 @@
       </div>
 
       <aside class="side-column">
-        <h2>Debug Console</h2>
+        <div class="console-header">
+          <h2>Debug Console</h2>
+          <button type="button" id="copyLogButton" class="copy-log-button" hidden>Copy Full Log</button>
+        </div>
         <div id="console" class="debug-console">Ready.</div>
       </aside>
     </div>

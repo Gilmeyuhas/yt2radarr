@@ -13,7 +13,8 @@ document.addEventListener('DOMContentLoaded', () => {
     extraFields: document.getElementById('extraFields'),
     extraNameInput: document.getElementById('extra_name'),
     consoleDiv: document.getElementById('console'),
-    downloadsList: document.getElementById('downloadsList')
+    downloadsList: document.getElementById('downloadsList'),
+    copyButton: document.getElementById('copyLogButton')
   };
 
   if (!elements.form) {
@@ -39,24 +40,156 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   const MAX_DOWNLOAD_ENTRIES = 8;
-  const POLL_INTERVAL = 3000;
+  const POLL_INTERVAL = 1000;
+
+  const initialDebugMode = document.body && document.body.dataset
+    ? document.body.dataset.debugMode === 'true'
+    : false;
 
   const state = {
     downloads: [],
-    pollers: new Map()
+    pollers: new Map(),
+    debugMode: initialDebugMode,
+    lastLogs: [],
+    copyFeedbackTimeout: null
   };
 
-  function appendConsoleLine(text, isError = false) {
+  const IMPORTANT_LINE_SNIPPETS = [
+    'success! video saved',
+    'renaming downloaded file',
+    'treating video as main video file',
+    'storing video in subfolder',
+    'created movie folder',
+    'fetching radarr details',
+    'resolved youtube format'
+  ];
+
+  const NOISY_WARNING_SNIPPETS = [
+    '[youtube]',
+    'sabr streaming',
+    'web client https formats have been skipped',
+    'web_safari client https formats have been skipped',
+    'tv client https formats have been skipped'
+  ];
+
+  const COPY_BUTTON_DEFAULT_LABEL = 'Copy Full Log';
+
+  function clearCopyFeedbackTimer() {
+    if (state.copyFeedbackTimeout) {
+      clearTimeout(state.copyFeedbackTimeout);
+      state.copyFeedbackTimeout = null;
+    }
+  }
+
+  function updateCopyButtonVisibility() {
+    if (!elements.copyButton) {
+      return;
+    }
+    clearCopyFeedbackTimer();
+    elements.copyButton.textContent = COPY_BUTTON_DEFAULT_LABEL;
+    if (state.debugMode) {
+      elements.copyButton.removeAttribute('hidden');
+      elements.copyButton.disabled = false;
+    } else {
+      elements.copyButton.setAttribute('hidden', 'hidden');
+    }
+  }
+
+  function setDebugMode(enabled) {
+    const value = Boolean(enabled);
+    const changed = state.debugMode !== value;
+    state.debugMode = value;
+    if (document.body && document.body.dataset) {
+      document.body.dataset.debugMode = value ? 'true' : 'false';
+    }
+    updateCopyButtonVisibility();
+    if (changed && state.lastLogs && state.lastLogs.length) {
+      renderLogLines(state.lastLogs);
+    }
+  }
+
+  function shouldDisplayLogLine(line) {
+    const original = typeof line === 'string' ? line : String(line ?? '');
+    const trimmed = original.trim();
+    if (!trimmed) {
+      return false;
+    }
+    const lowered = trimmed.toLowerCase();
+    if (lowered.startsWith('debug:')) {
+      return false;
+    }
+    if (lowered.startsWith('warning:')) {
+      return !NOISY_WARNING_SNIPPETS.some(snippet => lowered.includes(snippet));
+    }
+    if (lowered.startsWith('error:')) {
+      return true;
+    }
+    if (lowered.startsWith('[download]') || lowered.startsWith('[ffmpeg]') || lowered.startsWith('[merger]')) {
+      return true;
+    }
+    return IMPORTANT_LINE_SNIPPETS.some(snippet => lowered.includes(snippet));
+  }
+
+  function interpretLogLine(rawText, forcedType = null) {
+    const original = typeof rawText === 'string' ? rawText : String(rawText ?? '');
+    const trimmed = original.trim();
+    let type = forcedType || 'info';
+    let text = original;
+
+    if (!forcedType) {
+      const errorMatch = trimmed.match(/^ERROR:\s*(.*)$/i);
+      if (errorMatch) {
+        type = 'error';
+        text = errorMatch[1] || 'Error';
+        return { text, type };
+      }
+      const warningMatch = trimmed.match(/^WARNING:\s*(.*)$/i);
+      if (warningMatch) {
+        type = 'warning';
+        text = warningMatch[1] || 'Warning';
+        return { text, type };
+      }
+      const debugMatch = trimmed.match(/^DEBUG:\s*(.*)$/i);
+      if (debugMatch) {
+        type = 'debug';
+        text = debugMatch[1] || 'Debug';
+        return { text, type };
+      }
+      if (trimmed.startsWith('[download]')) {
+        type = 'progress';
+        text = trimmed;
+        return { text, type };
+      }
+      if (trimmed.startsWith('[ffmpeg]')) {
+        type = 'ffmpeg';
+        text = trimmed;
+        return { text, type };
+      }
+    }
+
+    if (forcedType === 'muted') {
+      type = 'muted';
+    } else if (forcedType === 'error') {
+      type = 'error';
+      text = trimmed.replace(/^ERROR:\s*/i, '') || text;
+    } else if (forcedType === 'warning') {
+      type = 'warning';
+      text = trimmed.replace(/^WARNING:\s*/i, '') || text;
+    }
+
+    return { text, type };
+  }
+
+  function appendConsoleLine(text, typeOverride = null) {
     if (!elements.consoleDiv) {
       return;
     }
     const lineElem = document.createElement('div');
-    lineElem.textContent = text;
-    if (isError) {
-      lineElem.classList.add('error-line');
-    }
-    elements.consoleDiv.appendChild(lineElem);
-    elements.consoleDiv.scrollTop = elements.consoleDiv.scrollHeight;
+    const { text: displayText, type } = interpretLogLine(text, typeOverride);
+    lineElem.textContent = displayText;
+    lineElem.classList.add('log-line', `log-${type}`);
+    elements.consoleDiv.insertBefore(lineElem, elements.consoleDiv.firstChild);
+    elements.consoleDiv.scrollTop = 0;
   }
 
   function resetConsole(message) {
@@ -64,6 +197,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     elements.consoleDiv.innerHTML = '';
+    state.lastLogs = [];
     if (message) {
       appendConsoleLine(message);
     }
@@ -75,14 +209,73 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     elements.consoleDiv.innerHTML = '';
     const entries = Array.isArray(lines) ? lines : [];
-    if (!entries.length) {
-      appendConsoleLine('No output yet.');
+    state.lastLogs = entries.slice();
+    const filtered = entries.filter(line => {
+      if (state.debugMode) {
+        return true;
+      }
+      return shouldDisplayLogLine(line);
+    });
+    if (!filtered.length) {
+      if (entries.length && !state.debugMode) {
+        appendConsoleLine(
+          'Verbose output hidden. Enable debug mode in Settings to view full yt-dlp logs.',
+          'muted'
+        );
+        return;
+      }
+      appendConsoleLine('No output yet.', 'muted');
       return;
     }
-    entries.forEach(line => {
-      const isError = typeof line === 'string' && line.trim().toUpperCase().startsWith('ERROR');
-      appendConsoleLine(line, isError);
+    filtered.forEach(line => {
+      appendConsoleLine(line);
     });
+  }
+
+  async function copyFullLogToClipboard() {
+    if (!elements.copyButton || !state.debugMode) {
+      return;
+    }
+    const content = Array.isArray(state.lastLogs) ? state.lastLogs.join('\n').trim() : '';
+    if (!content) {
+      appendConsoleLine('No log output available to copy yet.', 'muted');
+      return;
+    }
+
+    const handleSuccess = () => {
+      elements.copyButton.textContent = 'Copied!';
+      clearCopyFeedbackTimer();
+      state.copyFeedbackTimeout = setTimeout(() => {
+        elements.copyButton.textContent = COPY_BUTTON_DEFAULT_LABEL;
+        state.copyFeedbackTimeout = null;
+      }, 2000);
+    };
+
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(content);
+        handleSuccess();
+        return;
+      }
+    } catch (err) {
+      // Fallback below
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = content;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      document.execCommand('copy');
+      handleSuccess();
+    } catch (err) {
+      appendConsoleLine(`ERROR: Failed to copy log: ${err && err.message ? err.message : err}`, 'error');
+    } finally {
+      document.body.removeChild(textarea);
+    }
   }
 
   function cleanErrorText(text) {
@@ -225,6 +418,9 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(`HTTP ${response.status}`);
       }
       const data = await response.json();
+      if (typeof data.debug_mode === 'boolean') {
+        setDebugMode(data.debug_mode);
+      }
       const job = data && data.job ? data.job : null;
       if (!job) {
         stopJobPolling(jobId);
@@ -241,7 +437,7 @@ document.addEventListener('DOMContentLoaded', () => {
         stopJobPolling(jobId);
       }
     } catch (err) {
-      appendConsoleLine(`ERROR: Failed to poll job ${jobId}: ${err && err.message ? err.message : err}`, true);
+      appendConsoleLine(`ERROR: Failed to poll job ${jobId}: ${err && err.message ? err.message : err}`, 'error');
       stopJobPolling(jobId);
     }
   }
@@ -377,6 +573,9 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(`HTTP ${response.status}`);
       }
       const data = await response.json();
+      if (typeof data.debug_mode === 'boolean') {
+        setDebugMode(data.debug_mode);
+      }
       const jobs = Array.isArray(data.jobs) ? data.jobs : [];
       jobs.forEach(job => {
         const entry = normaliseJob(job);
@@ -388,7 +587,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       });
     } catch (err) {
-      appendConsoleLine(`ERROR: Failed to load job history: ${err && err.message ? err.message : err}`, true);
+      appendConsoleLine(`ERROR: Failed to load job history: ${err && err.message ? err.message : err}`, 'error');
     }
   }
 
@@ -399,6 +598,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (elements.extraCheckbox) {
     elements.extraCheckbox.addEventListener('change', updateExtraVisibility);
+  }
+
+  if (elements.copyButton) {
+    elements.copyButton.addEventListener('click', copyFullLogToClipboard);
   }
 
   elements.form.addEventListener('submit', async event => {
@@ -435,7 +638,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (errors.length) {
-      errors.forEach(message => appendConsoleLine(`ERROR: ${message}`, true));
+      errors.forEach(message => appendConsoleLine(`ERROR: ${message}`, 'error'));
       return;
     }
 
@@ -446,6 +649,9 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify(payload)
       });
       const data = await response.json().catch(() => ({}));
+      if (typeof data.debug_mode === 'boolean') {
+        setDebugMode(data.debug_mode);
+      }
 
       if (!response.ok) {
         const logs = Array.isArray(data.logs) ? data.logs : [];
@@ -472,10 +678,11 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       startJobPolling(job.id, { showConsole: true });
     } catch (err) {
-      appendConsoleLine(`ERROR: ${err && err.message ? err.message : err}`, true);
+      appendConsoleLine(`ERROR: ${err && err.message ? err.message : err}`, 'error');
     }
   });
 
+  setDebugMode(initialDebugMode);
   updateExtraVisibility();
   renderDownloads();
   loadInitialJobs();
