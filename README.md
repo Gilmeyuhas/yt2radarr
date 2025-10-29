@@ -101,3 +101,6 @@ Everything about the Compose file is customizable - swap ports, change mount poi
 
 ## 🤝 Contributing
 This project exists to scratch my own itch, but it’s open-source because others might find it useful too. Issues, feature ideas, documentation tweaks, puns, and pull requests are all encouraged. If you build something neat, please share it!
+
+## 📄 License
+MIT
