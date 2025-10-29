@@ -32,11 +32,11 @@ YTDLP_FORMAT_SELECTOR = (
     "bestvideo[height>=1440][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
     "bestvideo[height>=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
     "bestvideo[height>=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
-    "95/"
     "bestvideo[height>=2160]+bestaudio/"
     "bestvideo[height>=1440]+bestaudio/"
     "bestvideo[height>=1080]+bestaudio/"
     "bestvideo[height>=720]+bestaudio/"
+    "95/"
     "best"
 )
 
@@ -707,6 +707,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         command = ["yt-dlp"]
         if COOKIE_PATH:
             command += ["--cookies", COOKIE_PATH]
+        command += ["--newline"]
         command += ["-f", format_selector, "-o", target_template, yt_url]
 
         log("Running yt-dlp with explicit output template.")
