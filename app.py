@@ -8,6 +8,8 @@ import time
 import uuid
 from typing import Dict, List, Optional, Tuple
 
+from glob import glob as glob_paths
+
 import requests
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
@@ -19,6 +21,42 @@ COOKIE_PATH = os.environ.get("YT_COOKIE_FILE")
 CONFIG_BASE = os.environ.get("YT2RADARR_CONFIG_DIR", os.path.dirname(__file__))
 CONFIG_PATH = os.path.join(CONFIG_BASE, "config.json")
 JOBS_PATH = os.path.join(CONFIG_BASE, "jobs.json")
+
+# Prefer higher bitrate HLS/H.264 streams before falling back to DASH/AV1.
+# YouTube often serves low bitrate AV1 streams as "best", so bias toward
+# muxed or H.264/AAC combinations at the highest available resolution and only
+# allow other codecs when no higher quality HLS/H.264 options are available.
+YTDLP_FORMAT_SELECTOR = (
+    "bestvideo[height>=2160][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "bestvideo[height>=1440][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "bestvideo[height>=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "bestvideo[height>=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "95/"
+    "bestvideo[height>=2160]+bestaudio/"
+    "bestvideo[height>=1440]+bestaudio/"
+    "bestvideo[height>=1080]+bestaudio/"
+    "bestvideo[height>=720]+bestaudio/"
+    "best"
+)
+
+
+def _format_filesize(value: Optional[float]) -> str:
+    """Return a human-readable string for a byte size."""
+
+    if value is None:
+        return "unknown"
+    try:
+        size = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    if size <= 0:
+        return "unknown"
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    index = 0
+    while size >= 1024 and index < len(units) - 1:
+        size /= 1024
+        index += 1
+    return f"{size:.1f} {units[index]}"
 
 def _default_config() -> Dict:
     return {
@@ -38,6 +76,10 @@ jobs_repo = JobRepository(JOBS_PATH, max_items=50)
 
 def append_job_log(job_id: str, message: str) -> None:
     jobs_repo.append_logs(job_id, [message])
+
+
+def replace_job_log(job_id: str, message: str) -> None:
+    jobs_repo.replace_last_log(job_id, message)
 
 
 def _mark_job_failure(job_id: str, message: str) -> None:
@@ -527,13 +569,13 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         filename_base = filename_base or "Video"
         pattern = os.path.join(target_dir, f"{filename_base}.*")
-        if any(os.path.exists(path) for path in glob.glob(pattern)):
+        if any(os.path.exists(path) for path in glob_paths(pattern)):
             log(f"File stem '{filename_base}' already exists. Searching for a free filename.")
             index = 1
             while True:
                 candidate_base = f"{filename_base} ({index})"
                 candidate_pattern = os.path.join(target_dir, f"{candidate_base}.*")
-                if not any(os.path.exists(path) for path in glob.glob(candidate_pattern)):
+                if not any(os.path.exists(path) for path in glob_paths(candidate_pattern)):
                     filename_base = candidate_base
                     log(f"Selected new filename stem '{filename_base}'.")
                     break
@@ -549,16 +591,129 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             )
 
         progress_pattern = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
+        format_selector = YTDLP_FORMAT_SELECTOR
+
+        info_command = ["yt-dlp"]
+        if COOKIE_PATH:
+            info_command += ["--cookies", COOKIE_PATH]
+        info_command += [
+            "-f",
+            format_selector,
+            "--skip-download",
+            "--print-json",
+            yt_url,
+        ]
+
+        resolved_format: Dict[str, str] = {}
+        try:
+            info_result = subprocess.run(
+                info_command,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except Exception as exc:  # pragma: no cover - command failure
+            warn(f"Failed to query format details via yt-dlp: {exc}")
+        else:
+            info_payload: Optional[Dict] = None
+            for raw_line in info_result.stdout.splitlines():
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                try:
+                    info_payload = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                else:
+                    break
+
+            if info_payload:
+                requested_formats = info_payload.get("requested_formats") or []
+                if requested_formats:
+                    video_format = next(
+                        (entry for entry in requested_formats if entry.get("vcodec") not in (None, "none")),
+                        None,
+                    )
+                    audio_format = next(
+                        (entry for entry in requested_formats if entry.get("acodec") not in (None, "none")),
+                        None,
+                    )
+                    format_ids = [
+                        entry.get("format_id")
+                        for entry in requested_formats
+                        if entry.get("format_id")
+                    ]
+                    width_value = None
+                    height_value = None
+                    if video_format:
+                        width_value = video_format.get("width") or info_payload.get("width")
+                        height_value = video_format.get("height") or info_payload.get("height")
+                    else:
+                        width_value = info_payload.get("width")
+                        height_value = info_payload.get("height")
+                    vcodec_value = (video_format or {}).get("vcodec") or info_payload.get("vcodec")
+                    acodec_value = (audio_format or {}).get("acodec") or info_payload.get("acodec")
+                    total_size: Optional[float] = None
+                    size_components: List[float] = []
+                    for entry in requested_formats:
+                        for key in ("filesize", "filesize_approx"):
+                            candidate = entry.get(key)
+                            if isinstance(candidate, (int, float)) and candidate > 0:
+                                size_components.append(float(candidate))
+                                break
+                    if size_components:
+                        total_size = sum(size_components)
+                    resolution = "unknown"
+                    if width_value and height_value:
+                        resolution = f"{int(width_value)}x{int(height_value)}"
+                    format_id_value = "+".join(format_ids) if format_ids else "unknown"
+                    resolved_format = {
+                        "format_id": format_id_value,
+                        "resolution": resolution,
+                        "video_codec": vcodec_value or "unknown",
+                        "audio_codec": acodec_value or "unknown",
+                        "filesize": _format_filesize(total_size),
+                    }
+                else:
+                    format_id_value = info_payload.get("format_id") or "unknown"
+                    width_value = info_payload.get("width")
+                    height_value = info_payload.get("height")
+                    resolution = "unknown"
+                    if width_value and height_value:
+                        resolution = f"{int(width_value)}x{int(height_value)}"
+                    resolved_format = {
+                        "format_id": str(format_id_value),
+                        "resolution": resolution,
+                        "video_codec": info_payload.get("vcodec") or "unknown",
+                        "audio_codec": info_payload.get("acodec") or "unknown",
+                        "filesize": _format_filesize(
+                            info_payload.get("filesize") or info_payload.get("filesize_approx")
+                        ),
+                    }
+
+            if resolved_format:
+                log(
+                    "Resolved YouTube format: "
+                    f"id={resolved_format['format_id']}, "
+                    f"resolution={resolved_format['resolution']}, "
+                    f"video_codec={resolved_format['video_codec']}, "
+                    f"audio_codec={resolved_format['audio_codec']}, "
+                    f"filesize={resolved_format['filesize']}"
+                )
+            else:
+                log("yt-dlp did not report a resolved format; proceeding with download.")
+
         command = ["yt-dlp"]
         if COOKIE_PATH:
             command += ["--cookies", COOKIE_PATH]
-        command += ["-o", target_template, yt_url]
+        command += ["-f", format_selector, "-o", target_template, yt_url]
 
         log("Running yt-dlp with explicit output template.")
 
         _job_status(job_id, "processing", progress=20)
 
         output_lines: List[str] = []
+        progress_log_active = False
         try:
             process = subprocess.Popen(
                 command,
@@ -575,18 +730,28 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         assert process.stdout is not None
 
         def handle_output_line(text: str) -> None:
+            nonlocal progress_log_active
+
             line = text.strip()
             if not line:
                 return
             output_lines.append(line)
-            log(line)
             match = progress_pattern.search(line)
             if match:
                 try:
                     progress_value = float(match.group(1))
                 except (TypeError, ValueError):
+                    progress_value = None
+                if progress_value is not None:
+                    _job_status(job_id, "processing", progress=progress_value)
+                if line.startswith("[download]"):
+                    if not progress_log_active:
+                        append_job_log(job_id, line)
+                        progress_log_active = True
+                    else:
+                        replace_job_log(job_id, line)
                     return
-                _job_status(job_id, "processing", progress=progress_value)
+            log(line)
 
         for raw_line in process.stdout:
             line = raw_line.rstrip()
@@ -601,7 +766,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             failure_summary = output_lines[-1] if output_lines else "Download failed."
             log(f"yt-dlp exited with code {return_code}.")
 
-            for leftover in glob.glob(expected_pattern):
+            for leftover in glob_paths(expected_pattern):
                 if leftover.endswith(".part") or leftover.endswith(".ytdl"):
                     try:
                         os.remove(leftover)
@@ -613,7 +778,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         downloaded_candidates = [
             path
-            for path in glob.glob(expected_pattern)
+            for path in glob_paths(expected_pattern)
             if os.path.isfile(path) and not path.endswith((".part", ".ytdl"))
         ]
 
@@ -629,12 +794,37 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         if job_snapshot:
             metadata = list(job_snapshot.get("metadata") or [])
             updated_metadata: List[str] = []
+            def _should_keep(entry: object) -> bool:
+                if not isinstance(entry, str):
+                    return True
+                lowered = entry.lower()
+                prefixes = [
+                    "format:",
+                    "format id:",
+                    "resolution:",
+                    "video codec:",
+                    "audio codec:",
+                    "filesize:",
+                ]
+                return not any(lowered.startswith(prefix) for prefix in prefixes)
+
             for item in metadata:
-                if isinstance(item, str) and item.lower().startswith("format:"):
-                    continue
-                updated_metadata.append(item)
+                if _should_keep(item):
+                    updated_metadata.append(item)
+
             if actual_extension:
                 updated_metadata.append(f"Format: {actual_extension.upper()}")
+            if resolved_format.get("format_id"):
+                updated_metadata.append(f"Format ID: {resolved_format['format_id']}")
+            if resolved_format.get("resolution") and resolved_format["resolution"] != "unknown":
+                updated_metadata.append(f"Resolution: {resolved_format['resolution']}")
+            if resolved_format.get("video_codec") and resolved_format["video_codec"] != "unknown":
+                updated_metadata.append(f"Video Codec: {resolved_format['video_codec']}")
+            if resolved_format.get("audio_codec") and resolved_format["audio_codec"] != "unknown":
+                updated_metadata.append(f"Audio Codec: {resolved_format['audio_codec']}")
+            if resolved_format.get("filesize") and resolved_format["filesize"] != "unknown":
+                updated_metadata.append(f"Filesize: {resolved_format['filesize']}")
+
             jobs_repo.update(job_id, {"metadata": updated_metadata})
 
         if actual_extension:
