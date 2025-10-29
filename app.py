@@ -9,6 +9,8 @@ import time
 import uuid
 from typing import Dict, List, Optional, Tuple
 
+from glob import glob as glob_paths
+
 import requests
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
@@ -568,13 +570,13 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         filename_base = filename_base or "Video"
         pattern = os.path.join(target_dir, f"{filename_base}.*")
-        if any(os.path.exists(path) for path in glob.glob(pattern)):
+        if any(os.path.exists(path) for path in glob_paths(pattern)):
             log(f"File stem '{filename_base}' already exists. Searching for a free filename.")
             index = 1
             while True:
                 candidate_base = f"{filename_base} ({index})"
                 candidate_pattern = os.path.join(target_dir, f"{candidate_base}.*")
-                if not any(os.path.exists(path) for path in glob.glob(candidate_pattern)):
+                if not any(os.path.exists(path) for path in glob_paths(candidate_pattern)):
                     filename_base = candidate_base
                     log(f"Selected new filename stem '{filename_base}'.")
                     break
@@ -765,7 +767,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             failure_summary = output_lines[-1] if output_lines else "Download failed."
             log(f"yt-dlp exited with code {return_code}.")
 
-            for leftover in glob.glob(expected_pattern):
+            for leftover in glob_paths(expected_pattern):
                 if leftover.endswith(".part") or leftover.endswith(".ytdl"):
                     try:
                         os.remove(leftover)
@@ -777,7 +779,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         downloaded_candidates = [
             path
-            for path in glob.glob(expected_pattern)
+            for path in glob_paths(expected_pattern)
             if os.path.isfile(path) and not path.endswith((".part", ".ytdl"))
         ]
 
