@@ -96,16 +96,53 @@ def _job_status(job_id: str, status: str, progress: Optional[float] = None) -> N
     jobs_repo.status(job_id, status, progress=progress)
 
 
+_NOISY_WARNING_SNIPPETS = (
+    "[youtube]",
+    "sabr streaming",
+    "web client https formats have been skipped",
+    "web_safari client https formats have been skipped",
+    "tv client https formats have been skipped",
+)
+
+_ESSENTIAL_PHRASES = (
+    "success! video saved",
+    "renaming downloaded file",
+    "treating video as main video file",
+    "storing video in subfolder",
+    "created movie folder",
+    "fetching radarr details",
+    "resolved youtube format",
+)
+
+
 def _filter_logs_for_display(logs: Iterable[str], debug_mode: bool) -> List[str]:
     filtered: List[str] = []
     for raw in logs or []:
         text = str(raw)
-        if not debug_mode and text.strip().lower().startswith("debug:"):
+        trimmed = text.strip()
+        if not trimmed:
             continue
-        filtered.append(text)
-    if filtered:
-        return filtered
-    return []
+        if debug_mode:
+            filtered.append(trimmed)
+            continue
+
+        lowered = trimmed.lower()
+        if lowered.startswith("debug:"):
+            continue
+
+        if lowered.startswith("warning:") and any(
+            snippet in lowered for snippet in _NOISY_WARNING_SNIPPETS
+        ):
+            continue
+
+        if lowered.startswith(("error:", "warning:", "[download]", "[ffmpeg]", "[merger]")):
+            filtered.append(trimmed)
+            continue
+
+        if any(phrase in lowered for phrase in _ESSENTIAL_PHRASES):
+            filtered.append(trimmed)
+
+    return filtered if filtered else []
 
 
 def normalize_path_overrides(overrides: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -457,6 +494,9 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             fail("Application has not been configured yet.")
             return
 
+        debug_enabled = bool(config.get("debug_mode"))
+        compact_progress_logs = not debug_enabled
+
         yt_url = (payload.get("yturl") or "").strip()
         movie_id = (payload.get("movieId") or "").strip()
         tmdb = (payload.get("tmdb") or "").strip()
@@ -543,7 +583,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             os.makedirs(target_dir, exist_ok=True)
             log(f"Storing video in subfolder '{subfolder}'.")
         else:
-            log("Storing video alongside primary movie files.")
+            log("Treating video as main video file.")
 
         movie_stem = build_movie_stem(movie)
         log(f"Resolved Radarr movie stem to '{movie_stem}'.")
@@ -783,11 +823,14 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 if progress_value is not None:
                     _job_status(job_id, "processing", progress=progress_value)
                 if line.startswith("[download]"):
-                    if not progress_log_active:
-                        append_job_log(job_id, line)
-                        progress_log_active = True
+                    if compact_progress_logs:
+                        if not progress_log_active:
+                            append_job_log(job_id, line)
+                            progress_log_active = True
+                        else:
+                            replace_job_log(job_id, line)
                     else:
-                        replace_job_log(job_id, line)
+                        append_job_log(job_id, line)
                     return
             lowered = line.lower()
             if "error" in lowered:

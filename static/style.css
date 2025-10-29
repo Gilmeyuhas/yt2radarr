@@ -130,6 +130,37 @@ h2 {
   margin-bottom: 8px;
 }
 
+.console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.console-header h2 {
+  margin: 0;
+}
+
+.copy-log-button {
+  background: #2f81f7;
+  color: #fff;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.copy-log-button:hover:not(:disabled) {
+  background: #1f6feb;
+}
+
+.copy-log-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* Form styles */
 form {
   background: #2a2a2a;

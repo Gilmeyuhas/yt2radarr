@@ -13,7 +13,8 @@ document.addEventListener('DOMContentLoaded', () => {
     extraFields: document.getElementById('extraFields'),
     extraNameInput: document.getElementById('extra_name'),
     consoleDiv: document.getElementById('console'),
-    downloadsList: document.getElementById('downloadsList')
+    downloadsList: document.getElementById('downloadsList'),
+    copyButton: document.getElementById('copyLogButton')
   };
 
   if (!elements.form) {
@@ -49,21 +50,84 @@ document.addEventListener('DOMContentLoaded', () => {
     downloads: [],
     pollers: new Map(),
     debugMode: initialDebugMode,
-    lastLogs: []
+    lastLogs: [],
+    copyFeedbackTimeout: null
   };
+
+  const IMPORTANT_LINE_SNIPPETS = [
+    'success! video saved',
+    'renaming downloaded file',
+    'treating video as main video file',
+    'storing video in subfolder',
+    'created movie folder',
+    'fetching radarr details',
+    'resolved youtube format'
+  ];
+
+  const NOISY_WARNING_SNIPPETS = [
+    '[youtube]',
+    'sabr streaming',
+    'web client https formats have been skipped',
+    'web_safari client https formats have been skipped',
+    'tv client https formats have been skipped'
+  ];
+
+  const COPY_BUTTON_DEFAULT_LABEL = 'Copy Full Log';
+
+  function clearCopyFeedbackTimer() {
+    if (state.copyFeedbackTimeout) {
+      clearTimeout(state.copyFeedbackTimeout);
+      state.copyFeedbackTimeout = null;
+    }
+  }
+
+  function updateCopyButtonVisibility() {
+    if (!elements.copyButton) {
+      return;
+    }
+    clearCopyFeedbackTimer();
+    elements.copyButton.textContent = COPY_BUTTON_DEFAULT_LABEL;
+    if (state.debugMode) {
+      elements.copyButton.removeAttribute('hidden');
+      elements.copyButton.disabled = false;
+    } else {
+      elements.copyButton.setAttribute('hidden', 'hidden');
+    }
+  }
 
   function setDebugMode(enabled) {
     const value = Boolean(enabled);
-    if (state.debugMode === value) {
-      return;
-    }
+    const changed = state.debugMode !== value;
     state.debugMode = value;
     if (document.body && document.body.dataset) {
       document.body.dataset.debugMode = value ? 'true' : 'false';
     }
-    if (state.lastLogs && state.lastLogs.length) {
+    updateCopyButtonVisibility();
+    if (changed && state.lastLogs && state.lastLogs.length) {
       renderLogLines(state.lastLogs);
     }
+  }
+
+  function shouldDisplayLogLine(line) {
+    const original = typeof line === 'string' ? line : String(line ?? '');
+    const trimmed = original.trim();
+    if (!trimmed) {
+      return false;
+    }
+    const lowered = trimmed.toLowerCase();
+    if (lowered.startsWith('debug:')) {
+      return false;
+    }
+    if (lowered.startsWith('warning:')) {
+      return !NOISY_WARNING_SNIPPETS.some(snippet => lowered.includes(snippet));
+    }
+    if (lowered.startsWith('error:')) {
+      return true;
+    }
+    if (lowered.startsWith('[download]') || lowered.startsWith('[ffmpeg]') || lowered.startsWith('[merger]')) {
+      return true;
+    }
+    return IMPORTANT_LINE_SNIPPETS.some(snippet => lowered.includes(snippet));
   }
 
   function interpretLogLine(rawText, forcedType = null) {
@@ -150,7 +214,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (state.debugMode) {
         return true;
       }
-      return typeof line === 'string' ? !line.trim().toLowerCase().startsWith('debug:') : true;
+      return shouldDisplayLogLine(line);
     });
     if (!filtered.length) {
       if (entries.length && !state.debugMode) {
@@ -166,6 +230,52 @@ document.addEventListener('DOMContentLoaded', () => {
     filtered.forEach(line => {
       appendConsoleLine(line);
     });
+  }
+
+  async function copyFullLogToClipboard() {
+    if (!elements.copyButton || !state.debugMode) {
+      return;
+    }
+    const content = Array.isArray(state.lastLogs) ? state.lastLogs.join('\n').trim() : '';
+    if (!content) {
+      appendConsoleLine('No log output available to copy yet.', 'muted');
+      return;
+    }
+
+    const handleSuccess = () => {
+      elements.copyButton.textContent = 'Copied!';
+      clearCopyFeedbackTimer();
+      state.copyFeedbackTimeout = setTimeout(() => {
+        elements.copyButton.textContent = COPY_BUTTON_DEFAULT_LABEL;
+        state.copyFeedbackTimeout = null;
+      }, 2000);
+    };
+
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(content);
+        handleSuccess();
+        return;
+      }
+    } catch (err) {
+      // Fallback below
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = content;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      document.execCommand('copy');
+      handleSuccess();
+    } catch (err) {
+      appendConsoleLine(`ERROR: Failed to copy log: ${err && err.message ? err.message : err}`, 'error');
+    } finally {
+      document.body.removeChild(textarea);
+    }
   }
 
   function cleanErrorText(text) {
@@ -490,6 +600,10 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.extraCheckbox.addEventListener('change', updateExtraVisibility);
   }
 
+  if (elements.copyButton) {
+    elements.copyButton.addEventListener('click', copyFullLogToClipboard);
+  }
+
   elements.form.addEventListener('submit', async event => {
     event.preventDefault();
 
@@ -568,6 +682,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  setDebugMode(initialDebugMode);
   updateExtraVisibility();
   renderDownloads();
   loadInitialJobs();
