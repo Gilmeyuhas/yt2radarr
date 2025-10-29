@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -18,10 +19,10 @@ from jobs import JobRepository
 
 app = Flask(__name__)
 
-COOKIE_PATH = os.environ.get("YT_COOKIE_FILE")
 CONFIG_BASE = os.environ.get("YT2RADARR_CONFIG_DIR", os.path.dirname(__file__))
 CONFIG_PATH = os.path.join(CONFIG_BASE, "config.json")
 JOBS_PATH = os.path.join(CONFIG_BASE, "jobs.json")
+DEFAULT_COOKIE_FILENAME = "cookies.txt"
 
 # Prefer higher bitrate HLS/H.264 streams before falling back to DASH/AV1.
 # YouTube often serves low bitrate AV1 streams as "best", so bias toward
@@ -66,6 +67,7 @@ def _default_config() -> Dict:
         "file_paths": [],
         "path_overrides": [],
         "debug_mode": bool(os.environ.get("YT2RADARR_DEBUG", "").strip()),
+        "cookie_file": "",
     }
 
 
@@ -199,6 +201,13 @@ def load_config() -> Dict:
 
     config["debug_mode"] = bool(config.get("debug_mode"))
 
+    cookie_file = str(config.get("cookie_file") or "").strip()
+    if not cookie_file:
+        default_candidate = os.path.join(CONFIG_BASE, DEFAULT_COOKIE_FILENAME)
+        if os.path.exists(default_candidate):
+            cookie_file = DEFAULT_COOKIE_FILENAME
+    config["cookie_file"] = cookie_file
+
     _config_cache = config
     return config
 
@@ -264,6 +273,66 @@ def parse_path_overrides(raw_overrides: str) -> Tuple[List[Dict[str, str]], List
             continue
         overrides.append({"remote": remote, "local": local})
     return overrides, errors
+
+
+def _cookie_absolute_path(cookie_file: str) -> str:
+    if not cookie_file:
+        return ""
+    expanded = os.path.expanduser(cookie_file)
+    if os.path.isabs(expanded):
+        return os.path.abspath(expanded)
+    return os.path.abspath(os.path.join(CONFIG_BASE, expanded))
+
+
+def _secure_cookie_file(path: str) -> None:
+    if not path:
+        return
+    try:
+        if os.name == "nt":
+            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        else:
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def get_cookie_path(config: Optional[Dict] = None) -> str:
+    env_path = os.environ.get("YT_COOKIE_FILE")
+    if env_path:
+        absolute = _cookie_absolute_path(env_path)
+        if os.path.exists(absolute):
+            _secure_cookie_file(absolute)
+            return absolute
+    cfg = config or load_config()
+    cookie_file = str(cfg.get("cookie_file") or "").strip()
+    absolute = _cookie_absolute_path(cookie_file)
+    if absolute and os.path.exists(absolute):
+        _secure_cookie_file(absolute)
+        return absolute
+    return ""
+
+
+def save_cookie_text(raw_text: str) -> str:
+    os.makedirs(CONFIG_BASE or ".", exist_ok=True)
+    cookie_file = DEFAULT_COOKIE_FILENAME
+    target_path = _cookie_absolute_path(cookie_file)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    mode = 0o600 if os.name != "nt" else 0o666
+    with os.fdopen(os.open(target_path, flags, mode), "w", encoding="utf-8") as handle:
+        handle.write(raw_text.strip() + "\n")
+    _secure_cookie_file(target_path)
+    return cookie_file
+
+
+def delete_cookie_file(cookie_file: str) -> None:
+    absolute = _cookie_absolute_path(cookie_file)
+    if not absolute:
+        return
+    try:
+        if os.path.exists(absolute):
+            os.remove(absolute)
+    except OSError:
+        pass
 
 
 @app.before_request
@@ -496,6 +565,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         debug_enabled = bool(config.get("debug_mode"))
         compact_progress_logs = not debug_enabled
+        cookie_path = get_cookie_path(config)
 
         yt_url = (payload.get("yturl") or "").strip()
         movie_id = (payload.get("movieId") or "").strip()
@@ -608,8 +678,8 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     "yt-dlp",
                     "--get-title",
                 ]
-                if COOKIE_PATH:
-                    yt_cmd += ["--cookies", COOKIE_PATH]
+                if cookie_path:
+                    yt_cmd += ["--cookies", cookie_path]
                 yt_cmd.append(yt_url)
                 proc = subprocess.run(
                     yt_cmd,
@@ -663,8 +733,8 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         format_selector = YTDLP_FORMAT_SELECTOR
 
         info_command = ["yt-dlp"]
-        if COOKIE_PATH:
-            info_command += ["--cookies", COOKIE_PATH]
+        if cookie_path:
+            info_command += ["--cookies", cookie_path]
         info_command += [
             "-f",
             format_selector,
@@ -773,8 +843,8 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 log("yt-dlp did not report a resolved format; proceeding with download.")
 
         command = ["yt-dlp"]
-        if COOKIE_PATH:
-            command += ["--cookies", COOKIE_PATH]
+        if cookie_path:
+            command += ["--cookies", cookie_path]
         command += ["--newline"]
         command += ["-f", format_selector, "-o", target_template, yt_url]
 
@@ -1118,6 +1188,8 @@ def setup():
         f"{item['remote']} => {item['local']}" for item in config.get("path_overrides", [])
     )
 
+    cookie_preview = ""
+
     if request.method == "POST":
         radarr_url = (request.form.get("radarr_url") or "").strip().rstrip("/")
         api_key = (request.form.get("radarr_api_key") or "").strip()
@@ -1129,6 +1201,10 @@ def setup():
         overrides = normalize_path_overrides(override_entries)
         errors.extend(override_errors)
         debug_mode = bool(request.form.get("debug_mode"))
+
+        cookie_text = request.form.get("cookie_text") or ""
+        cookie_preview = cookie_text
+        clear_cookies = bool(request.form.get("clear_cookies"))
 
         if not radarr_url:
             errors.append("Radarr URL is required.")
@@ -1150,6 +1226,11 @@ def setup():
         )
 
         if not errors:
+            if cookie_text.strip():
+                config["cookie_file"] = save_cookie_text(cookie_text)
+            elif clear_cookies:
+                delete_cookie_file(config.get("cookie_file", ""))
+                config["cookie_file"] = ""
             save_config(config)
             return redirect(url_for("index"))
 
@@ -1159,6 +1240,9 @@ def setup():
         errors=errors,
         configured=is_configured(config),
         overrides_text=overrides_text,
+        cookie_preview=cookie_preview,
+        cookie_env_path=os.environ.get("YT_COOKIE_FILE", ""),
+        resolved_cookie_path=get_cookie_path(config),
     )
 
 
