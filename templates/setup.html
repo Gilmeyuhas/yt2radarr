@@ -68,6 +68,18 @@
                 required
               />
             </div>
+
+            <div class="form-check">
+              <input
+                type="checkbox"
+                id="debug_mode"
+                name="debug_mode"
+                value="1"
+                {% if config.get('debug_mode') %}checked{% endif %}
+              />
+              <label for="debug_mode">Enable verbose debug logging</label>
+              <p class="form-note">When enabled, the debug console will include all yt-dlp output. Leave disabled to hide routine progress messages.</p>
+            </div>
           </div>
 
           <div class="form-section">

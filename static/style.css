@@ -511,19 +511,57 @@ button[type="submit"]:hover {
 
 /* Debug console styles */
 .debug-console {
-  background: #111;
-  color: #e0e0e0;
-  font-family: monospace;
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
   font-size: 0.95em;
   padding: 10px;
-  border: 1px solid #333;
+  border: 1px solid #30363d;
+  border-radius: 6px;
   flex: 1 1 200px;
   min-height: 200px;
   overflow-y: auto;
   white-space: pre-wrap;
 }
-.debug-console .error-line {
-  color: #ff5555;
+
+.debug-console .log-line {
+  padding: 4px 6px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  transition: background-color 0.2s ease;
+}
+
+.debug-console .log-line:last-child {
+  margin-bottom: 0;
+}
+
+.debug-console .log-info {
+  color: #e6edf3;
+}
+
+.debug-console .log-progress {
+  color: #8be9fd;
+}
+
+.debug-console .log-warning {
+  color: #ffdc73;
+}
+
+.debug-console .log-error {
+  color: #ff7b72;
+}
+
+.debug-console .log-ffmpeg {
+  color: #c792ea;
+}
+
+.debug-console .log-debug {
+  color: #94a3b8;
+}
+
+.debug-console .log-muted {
+  color: #7f8c9b;
+  font-style: italic;
 }
 
 @media (max-width: 1200px) {

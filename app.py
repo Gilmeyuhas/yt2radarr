@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 import uuid
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from glob import glob as glob_paths
 
@@ -65,6 +65,7 @@ def _default_config() -> Dict:
         "radarr_api_key": os.environ.get("RADARR_API_KEY") or "",
         "file_paths": [],
         "path_overrides": [],
+        "debug_mode": bool(os.environ.get("YT2RADARR_DEBUG", "").strip()),
     }
 
 
@@ -93,6 +94,18 @@ def _mark_job_success(job_id: str) -> None:
 
 def _job_status(job_id: str, status: str, progress: Optional[float] = None) -> None:
     jobs_repo.status(job_id, status, progress=progress)
+
+
+def _filter_logs_for_display(logs: Iterable[str], debug_mode: bool) -> List[str]:
+    filtered: List[str] = []
+    for raw in logs or []:
+        text = str(raw)
+        if not debug_mode and text.strip().lower().startswith("debug:"):
+            continue
+        filtered.append(text)
+    if filtered:
+        return filtered
+    return []
 
 
 def normalize_path_overrides(overrides: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -146,6 +159,8 @@ def load_config() -> Dict:
     if not isinstance(overrides_raw, list):
         overrides_raw = []
     config["path_overrides"] = normalize_path_overrides(overrides_raw)
+
+    config["debug_mode"] = bool(config.get("debug_mode"))
 
     _config_cache = config
     return config
@@ -344,7 +359,12 @@ def _describe_job(payload: Dict) -> Dict:
 def index():
     movies = get_all_movies()
     config = load_config()
-    return render_template("index.html", movies=movies, configured=is_configured(config))
+    return render_template(
+        "index.html",
+        movies=movies,
+        configured=is_configured(config),
+        debug_mode=config.get("debug_mode", False),
+    )
 @app.route("/create", methods=["POST"])
 def create():
     config = load_config()
@@ -408,7 +428,12 @@ def create():
     worker = threading.Thread(target=process_download_job, args=(job_id, payload), daemon=True)
     worker.start()
 
-    return jsonify({"job": job_record}), 202
+    display_job = dict(job_record)
+    display_job["logs"] = _filter_logs_for_display(
+        display_job.get("logs", []), config.get("debug_mode", False)
+    )
+
+    return jsonify({"job": display_job, "debug_mode": config.get("debug_mode", False)}), 202
 
 
 def process_download_job(job_id: str, payload: Dict) -> None:
@@ -421,6 +446,9 @@ def process_download_job(job_id: str, payload: Dict) -> None:
     def fail(message: str) -> None:
         append_job_log(job_id, f"ERROR: {message}")
         _mark_job_failure(job_id, message)
+
+    def debug(message: str) -> None:
+        append_job_log(job_id, f"DEBUG: {message}")
 
     try:
         _job_status(job_id, "processing", progress=1)
@@ -731,6 +759,14 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         assert process.stdout is not None
 
+        debug_prefixes = (
+            "[debug]",
+            "[info]",
+            "[extractor]",
+            "[metadata]",
+            "[youtube]",
+        )
+
         def handle_output_line(text: str) -> None:
             nonlocal progress_log_active
 
@@ -753,6 +789,19 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     else:
                         replace_job_log(job_id, line)
                     return
+            lowered = line.lower()
+            if "error" in lowered:
+                append_job_log(job_id, f"ERROR: {line}")
+                return
+            if "warning" in lowered:
+                warn(line)
+                return
+            if line.startswith("[download]") or line.startswith("[ffmpeg]"):
+                log(line)
+                return
+            if line.lower().startswith(debug_prefixes):
+                debug(line)
+                return
             log(line)
 
         for raw_line in process.stdout:
@@ -897,15 +946,23 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
 @app.route("/jobs", methods=["GET"])
 def jobs_index():
-    return jsonify({"jobs": jobs_repo.list()})
+    config = load_config()
+    return jsonify(
+        {
+            "jobs": jobs_repo.list(),
+            "debug_mode": config.get("debug_mode", False),
+        }
+    )
 
 
 @app.route("/jobs/<job_id>", methods=["GET"])
 def job_detail(job_id: str):
+    config = load_config()
     job = jobs_repo.get(job_id, include_logs=True)
     if job is None:
         return jsonify({"error": "Job not found."}), 404
-    return jsonify({"job": job})
+    job["logs"] = _filter_logs_for_display(job.get("logs", []), config.get("debug_mode", False))
+    return jsonify({"job": job, "debug_mode": config.get("debug_mode", False)})
 
 
 def _apply_path_overrides(original_path: str, overrides: List[Dict[str, str]]) -> Optional[str]:
@@ -1028,6 +1085,7 @@ def setup():
         override_entries, override_errors = parse_path_overrides(raw_overrides)
         overrides = normalize_path_overrides(override_entries)
         errors.extend(override_errors)
+        debug_mode = bool(request.form.get("debug_mode"))
 
         if not radarr_url:
             errors.append("Radarr URL is required.")
@@ -1044,6 +1102,7 @@ def setup():
                 "radarr_api_key": api_key,
                 "file_paths": file_paths,
                 "path_overrides": overrides,
+                "debug_mode": debug_mode,
             }
         )
 
