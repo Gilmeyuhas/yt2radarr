@@ -1,4 +1,7 @@
-import glob
+"""Flask application that bridges YouTube downloads into Radarr."""
+
+# pylint: disable=too-many-lines
+
 import json
 import os
 import re
@@ -6,14 +9,13 @@ import shutil
 import stat
 import subprocess
 import threading
-import time
 import uuid
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from glob import glob as glob_paths
 
-import requests
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+import requests  # pylint: disable=import-error
+from flask import Flask, jsonify, redirect, render_template, request, url_for  # pylint: disable=import-error
 
 from jobs import JobRepository
 
@@ -54,11 +56,11 @@ def _format_filesize(value: Optional[float]) -> str:
     if size <= 0:
         return "unknown"
     units = ["B", "KiB", "MiB", "GiB", "TiB"]
-    index = 0
-    while size >= 1024 and index < len(units) - 1:
+    unit_index = 0
+    while size >= 1024 and unit_index < len(units) - 1:
         size /= 1024
-        index += 1
-    return f"{size:.1f} {units[index]}"
+        unit_index += 1
+    return f"{size:.1f} {units[unit_index]}"
 
 def _default_config() -> Dict:
     return {
@@ -71,30 +73,33 @@ def _default_config() -> Dict:
     }
 
 
-_config_cache: Optional[Dict] = None
-
-_movies_cache: Optional[List[Dict]] = None
+_CACHE: Dict[str, Optional[Any]] = {"config": None, "movies": None}
 
 jobs_repo = JobRepository(JOBS_PATH, max_items=50)
 
 
 def append_job_log(job_id: str, message: str) -> None:
+    """Append a single log message to the given job."""
     jobs_repo.append_logs(job_id, [message])
 
 
 def replace_job_log(job_id: str, message: str) -> None:
+    """Replace the most recent log entry for a job."""
     jobs_repo.replace_last_log(job_id, message)
 
 
 def _mark_job_failure(job_id: str, message: str) -> None:
+    """Mark the specified job as failed."""
     jobs_repo.mark_failure(job_id, message)
 
 
 def _mark_job_success(job_id: str) -> None:
+    """Mark the specified job as successful."""
     jobs_repo.mark_success(job_id)
 
 
 def _job_status(job_id: str, status: str, progress: Optional[float] = None) -> None:
+    """Persist a status update for a job."""
     jobs_repo.status(job_id, status, progress=progress)
 
 
@@ -169,9 +174,9 @@ def normalize_path_overrides(overrides: List[Dict[str, str]]) -> List[Dict[str, 
 def load_config() -> Dict:
     """Load configuration from disk or environment defaults."""
 
-    global _config_cache
-    if _config_cache is not None:
-        return _config_cache
+    cached_config = _CACHE.get("config")
+    if isinstance(cached_config, dict):
+        return cached_config
 
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
@@ -183,7 +188,7 @@ def load_config() -> Dict:
             config.update(data)
     except FileNotFoundError:
         config = _default_config()
-    except Exception as exc:  # pragma: no cover - configuration file errors
+    except (OSError, json.JSONDecodeError) as exc:  # pragma: no cover - configuration file errors
         print(f"Failed to load configuration: {exc}")
         config = _default_config()
 
@@ -208,19 +213,18 @@ def load_config() -> Dict:
             cookie_file = DEFAULT_COOKIE_FILENAME
     config["cookie_file"] = cookie_file
 
-    _config_cache = config
+    _CACHE["config"] = config
     return config
 
 
 def save_config(config: Dict) -> None:
     """Persist configuration to disk and reset caches."""
 
-    global _config_cache, _movies_cache
     os.makedirs(os.path.dirname(CONFIG_PATH) or ".", exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)
-    _config_cache = config
-    _movies_cache = None
+    _CACHE["config"] = config
+    _CACHE["movies"] = None
 
 
 def is_configured(config: Optional[Dict] = None) -> bool:
@@ -249,7 +253,7 @@ def parse_path_overrides(raw_overrides: str) -> Tuple[List[Dict[str, str]], List
 
     overrides: List[Dict[str, str]] = []
     errors: List[str] = []
-    for index, line in enumerate(raw_overrides.splitlines(), start=1):
+    for line_number, line in enumerate(raw_overrides.splitlines(), start=1):
         cleaned = line.strip()
         if not cleaned:
             continue
@@ -260,7 +264,7 @@ def parse_path_overrides(raw_overrides: str) -> Tuple[List[Dict[str, str]], List
                 break
         if separator is None:
             errors.append(
-                f"Path override line {index} must use 'remote => local' format: {cleaned!r}"
+                f"Path override line {line_number} must use 'remote => local' format: {cleaned!r}"
             )
             continue
         remote_raw, local_raw = cleaned.split(separator, 1)
@@ -268,7 +272,7 @@ def parse_path_overrides(raw_overrides: str) -> Tuple[List[Dict[str, str]], List
         local = local_raw.strip()
         if not remote or not local:
             errors.append(
-                f"Path override line {index} is missing a remote or local path: {cleaned!r}"
+                f"Path override line {line_number} is missing a remote or local path: {cleaned!r}"
             )
             continue
         overrides.append({"remote": remote, "local": local})
@@ -276,6 +280,7 @@ def parse_path_overrides(raw_overrides: str) -> Tuple[List[Dict[str, str]], List
 
 
 def _cookie_absolute_path(cookie_file: str) -> str:
+    """Return an absolute cookie file path for a configured value."""
     if not cookie_file:
         return ""
     expanded = os.path.expanduser(cookie_file)
@@ -285,6 +290,7 @@ def _cookie_absolute_path(cookie_file: str) -> str:
 
 
 def _secure_cookie_file(path: str) -> None:
+    """Set restrictive permissions on the cookie file when possible."""
     if not path:
         return
     try:
@@ -297,6 +303,7 @@ def _secure_cookie_file(path: str) -> None:
 
 
 def get_cookie_path(config: Optional[Dict] = None) -> str:
+    """Locate the cookie file, preferring environment overrides."""
     env_path = os.environ.get("YT_COOKIE_FILE")
     if env_path:
         absolute = _cookie_absolute_path(env_path)
@@ -313,6 +320,7 @@ def get_cookie_path(config: Optional[Dict] = None) -> str:
 
 
 def save_cookie_text(raw_text: str) -> str:
+    """Persist cookie text to disk and return the relative filename."""
     os.makedirs(CONFIG_BASE or ".", exist_ok=True)
     cookie_file = DEFAULT_COOKIE_FILENAME
     target_path = _cookie_absolute_path(cookie_file)
@@ -325,6 +333,7 @@ def save_cookie_text(raw_text: str) -> str:
 
 
 def delete_cookie_file(cookie_file: str) -> None:
+    """Delete the configured cookie file if it exists."""
     absolute = _cookie_absolute_path(cookie_file)
     if not absolute:
         return
@@ -350,9 +359,9 @@ def ensure_configured() -> Optional[object]:
 
 def get_all_movies() -> List[Dict]:
     """Fetch all movies from Radarr and cache the results."""
-    global _movies_cache
-    if _movies_cache is not None:
-        return _movies_cache
+    cached_movies = _CACHE.get("movies")
+    if isinstance(cached_movies, list):
+        return cached_movies
 
     config = load_config()
     if not is_configured(config):
@@ -367,9 +376,9 @@ def get_all_movies() -> List[Dict]:
         response.raise_for_status()
         movies = response.json()
         movies.sort(key=lambda movie: movie.get("title", "").lower())
-        _movies_cache = movies
+        _CACHE["movies"] = movies
         return movies
-    except Exception as exc:  # pragma: no cover - network errors
+    except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network errors
         print(f"Error fetching movies from Radarr: {exc}")
         return []
 
@@ -422,9 +431,14 @@ def resolve_movie_by_metadata(
             matches = [movie for movie in matches if str(movie.get("year") or "") == year]
         if matches:
             match = matches[0]
-            log(
-                f"Matched title '{title}'{' (' + year + ')' if year else ''} to Radarr movie '{match.get('title')}'."
-            )
+            match_title = match.get("title") or ""
+            if year:
+                description = (
+                    f"Matched title '{title}' ({year}) to Radarr movie '{match_title}'."
+                )
+            else:
+                description = f"Matched title '{title}' to Radarr movie '{match_title}'."
+            log(description)
             return match
     return None
 
@@ -442,6 +456,7 @@ EXTRA_TYPE_LABELS = {
 
 
 def _describe_job(payload: Dict) -> Dict:
+    """Build presentation metadata for a job payload."""
     movie_label = (payload.get("movieName") or payload.get("title") or "").strip()
     if not movie_label:
         movie_label = "Selected Movie"
@@ -463,6 +478,7 @@ def _describe_job(payload: Dict) -> Dict:
 
 @app.route("/", methods=["GET"])
 def index():
+    """Render the main application interface."""
     movies = get_all_movies()
     config = load_config()
     return render_template(
@@ -473,6 +489,7 @@ def index():
     )
 @app.route("/create", methods=["POST"])
 def create():
+    """Create a new download job from the submitted request payload."""
     config = load_config()
     if not is_configured(config):
         return jsonify({"logs": ["ERROR: Application has not been configured yet."]}), 503
@@ -543,6 +560,9 @@ def create():
 
 
 def process_download_job(job_id: str, payload: Dict) -> None:
+    """Execute the yt-dlp workflow for a queued job."""
+    # pylint: disable=too-many-locals,too-many-branches,too-many-nested-blocks
+    # pylint: disable=too-many-statements,too-many-return-statements
     def log(message: str) -> None:
         append_job_log(job_id, message)
 
@@ -617,7 +637,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             )
             response.raise_for_status()
             movie = response.json()
-        except Exception as exc:  # pragma: no cover - network errors
+        except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network errors
             fail(f"Could not retrieve movie info from Radarr (ID {movie_id}): {exc}")
             return
 
@@ -689,7 +709,11 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 )
                 descriptive = proc.stdout.strip() or "Video"
                 log(f"Using YouTube title '{descriptive}'.")
-            except Exception as exc:  # pragma: no cover - command failure
+            except (
+                subprocess.CalledProcessError,
+                FileNotFoundError,
+                OSError,
+            ) as exc:  # pragma: no cover - command failure
                 descriptive = "Video"
                 warn(
                     f"Failed to retrieve title from yt-dlp ({exc}). Using fallback name 'Video'."
@@ -710,15 +734,15 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         pattern = os.path.join(target_dir, f"{filename_base}.*")
         if any(os.path.exists(path) for path in glob_paths(pattern)):
             log(f"File stem '{filename_base}' already exists. Searching for a free filename.")
-            index = 1
+            suffix_index = 1
             while True:
-                candidate_base = f"{filename_base} ({index})"
+                candidate_base = f"{filename_base} ({suffix_index})"
                 candidate_pattern = os.path.join(target_dir, f"{candidate_base}.*")
                 if not any(os.path.exists(path) for path in glob_paths(candidate_pattern)):
                     filename_base = candidate_base
                     log(f"Selected new filename stem '{filename_base}'.")
                     break
-                index += 1
+                suffix_index += 1
 
         template_base = filename_base.replace("%", "%%")
         target_template = os.path.join(target_dir, f"{template_base}.%(ext)s")
@@ -726,7 +750,8 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         if shutil.which("ffmpeg") is None:
             warn(
-                "ffmpeg executable not found; yt-dlp may fall back to a lower quality progressive stream."
+                "ffmpeg executable not found; yt-dlp may fall back to a lower quality "
+                "progressive stream."
             )
 
         progress_pattern = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
@@ -751,7 +776,11 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 text=True,
                 check=True,
             )
-        except Exception as exc:  # pragma: no cover - command failure
+        except (
+            subprocess.CalledProcessError,
+            FileNotFoundError,
+            OSError,
+        ) as exc:  # pragma: no cover - command failure
             warn(f"Failed to query format details via yt-dlp: {exc}")
         else:
             info_payload: Optional[Dict] = None
@@ -770,11 +799,19 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 requested_formats = info_payload.get("requested_formats") or []
                 if requested_formats:
                     video_format = next(
-                        (entry for entry in requested_formats if entry.get("vcodec") not in (None, "none")),
+                        (
+                            entry
+                            for entry in requested_formats
+                            if entry.get("vcodec") not in (None, "none")
+                        ),
                         None,
                     )
                     audio_format = next(
-                        (entry for entry in requested_formats if entry.get("acodec") not in (None, "none")),
+                        (
+                            entry
+                            for entry in requested_formats
+                            if entry.get("acodec") not in (None, "none")
+                        ),
                         None,
                     )
                     format_ids = [
@@ -854,20 +891,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         output_lines: List[str] = []
         progress_log_active = False
-        try:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                cwd=target_dir,
-            )
-        except Exception as exc:  # pragma: no cover - command failure
-            fail(f"Failed to invoke yt-dlp: {exc}")
-            return
-
-        assert process.stdout is not None
 
         debug_prefixes = (
             "[debug]",
@@ -917,14 +940,25 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 return
             log(line)
 
-        for raw_line in process.stdout:
-            line = raw_line.rstrip()
-            if not line:
-                continue
-            handle_output_line(line)
-
-        process.stdout.close()
-        return_code = process.wait()
+        try:
+            with subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                cwd=target_dir,
+            ) as process:
+                assert process.stdout is not None
+                for raw_line in process.stdout:
+                    line = raw_line.rstrip()
+                    if not line:
+                        continue
+                    handle_output_line(line)
+                return_code = process.wait()
+        except (OSError, ValueError) as exc:  # pragma: no cover - command failure
+            fail(f"Failed to invoke yt-dlp: {exc}")
+            return
 
         if return_code != 0:
             failure_summary = output_lines[-1] if output_lines else "Download failed."
@@ -1012,18 +1046,21 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         if os.path.exists(canonical_path):
             base_name, ext_part = os.path.splitext(canonical_filename)
             log(
-                f"Canonical filename '{canonical_filename}' already exists. Searching for a free name."
+                (
+                    f"Canonical filename '{canonical_filename}' already exists. "
+                    "Searching for a free name."
+                )
             )
-            index = 1
+            name_suffix = 1
             while True:
-                new_filename = f"{base_name} ({index}){ext_part}"
+                new_filename = f"{base_name} ({name_suffix}){ext_part}"
                 candidate = os.path.join(target_dir, new_filename)
                 if not os.path.exists(candidate):
                     canonical_filename = new_filename
                     canonical_path = candidate
                     log(f"Selected canonical filename '{new_filename}'.")
                     break
-                index += 1
+                name_suffix += 1
 
         try:
             if os.path.abspath(target_path) != os.path.abspath(canonical_path):
@@ -1034,7 +1071,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 target_path = canonical_path
             else:
                 log("Download already matches canonical filename.")
-        except Exception as exc:
+        except OSError as exc:
             fail(
                 f"Failed to rename downloaded file to '{canonical_filename}': {exc}"
             )
@@ -1053,12 +1090,15 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         _job_status(job_id, "processing", progress=100)
         log(f"Success! Video saved as '{target_path}'.")
         _mark_job_success(job_id)
+    # pylint: disable=broad-exception-caught
     except Exception as exc:  # pragma: no cover - unexpected failure
         fail(f"Unexpected error: {exc}")
+    # pylint: enable=broad-exception-caught
 
 
 @app.route("/jobs", methods=["GET"])
 def jobs_index():
+    """Return the current job list and debug mode flag."""
     config = load_config()
     return jsonify(
         {
@@ -1070,6 +1110,7 @@ def jobs_index():
 
 @app.route("/jobs/<job_id>", methods=["GET"])
 def job_detail(job_id: str):
+    """Return detailed information for a specific job."""
     config = load_config()
     job = jobs_repo.get(job_id, include_logs=True)
     if job is None:
@@ -1078,27 +1119,48 @@ def job_detail(job_id: str):
     return jsonify({"job": job, "debug_mode": config.get("debug_mode", False)})
 
 
-def _apply_path_overrides(original_path: str, overrides: List[Dict[str, str]]) -> Optional[str]:
-    """Return the first override that matches the Radarr path."""
+def _resolve_override_target(
+    normalized_original: str,
+    overrides: Iterable[Dict[str, str]],
+    ensure_candidate: Callable[[str, Optional[str]], Optional[str]],
+) -> Optional[str]:
+    """Return a resolved path using configured override mappings."""
 
-    normalized_original = os.path.normpath(original_path).replace("\\", "/")
-
-    for entry in overrides:
-        remote = os.path.normpath(entry["remote"]).replace("\\", "/")
-        local = entry["local"]
-
-        if normalized_original == remote:
-            candidate = local
-        elif normalized_original.startswith(remote + "/"):
-            remainder = normalized_original[len(remote) + 1 :]
-            candidate = os.path.join(local, remainder)
+    for override in overrides:
+        remote = (override.get("remote") or "").strip()
+        local = (override.get("local") or "").strip()
+        if not remote or not local:
+            continue
+        remote_normalized = os.path.normpath(remote).replace("\\", "/")
+        if normalized_original == remote_normalized:
+            remainder = ""
+        elif normalized_original.startswith(remote_normalized + "/"):
+            remainder = normalized_original[len(remote_normalized) + 1 :]
         else:
             continue
+        candidate = (
+            os.path.normpath(os.path.join(local, remainder)) if remainder else local
+        )
+        base_dir = os.path.dirname(candidate) if remainder else None
+        resolved = ensure_candidate(candidate, base_dir or local)
+        if resolved:
+            return resolved
 
-        candidate_path = os.path.normpath(candidate)
-        if os.path.isdir(candidate_path):
-            return candidate_path
+    return None
 
+
+def _resolve_library_target(
+    folder_name: str,
+    search_paths: Iterable[str],
+    ensure_candidate: Callable[[str, Optional[str]], Optional[str]],
+) -> Optional[str]:
+    """Return a resolved path using configured library search paths."""
+
+    for base_path in search_paths:
+        candidate = os.path.join(base_path, folder_name)
+        resolved = ensure_candidate(candidate, base_path)
+        if resolved:
+            return resolved
     return None
 
 
@@ -1132,55 +1194,43 @@ def resolve_movie_path(
         created = True
         return candidate
 
-    if original_path:
-        normalized_path = os.path.normpath(str(original_path))
-        if os.path.isdir(normalized_path):
-            return normalized_path, created
-        direct_candidate = ensure_candidate(
+    if not original_path:
+        return None, created
+
+    normalized_path = os.path.normpath(str(original_path))
+    resolved_path: Optional[str] = None
+
+    if os.path.isdir(normalized_path):
+        resolved_path = normalized_path
+    else:
+        resolved_path = ensure_candidate(
             normalized_path, os.path.dirname(normalized_path)
         )
-        if direct_candidate:
-            return direct_candidate, created
-    else:
-        return None, created
 
-    normalized_original = normalized_path.replace("\\", "/")
-
-    for override in config.get("path_overrides", []):
-        remote = (override.get("remote") or "").strip()
-        local = (override.get("local") or "").strip()
-        if not remote or not local:
-            continue
-        remote_normalized = os.path.normpath(remote).replace("\\", "/")
-        if normalized_original == remote_normalized:
-            remainder = ""
-        elif normalized_original.startswith(remote_normalized + "/"):
-            remainder = normalized_original[len(remote_normalized) + 1 :]
-        else:
-            continue
-        candidate = (
-            os.path.normpath(os.path.join(local, remainder)) if remainder else local
+    if resolved_path is None:
+        normalized_original = normalized_path.replace("\\", "/")
+        resolved_path = _resolve_override_target(
+            normalized_original,
+            config.get("path_overrides", []),
+            ensure_candidate,
         )
-        base_dir = os.path.dirname(candidate) if remainder else None
-        resolved = ensure_candidate(candidate, base_dir or local)
-        if resolved:
-            return resolved, created
 
-    folder_name = os.path.basename(normalized_path.rstrip(os.sep))
-    if not folder_name:
-        return None, created
+    if resolved_path is None:
+        folder_name = os.path.basename(normalized_path.rstrip(os.sep))
+        if folder_name:
+            resolved_path = _resolve_library_target(
+                folder_name,
+                config.get("file_paths", []),
+                ensure_candidate,
+            )
 
-    for base_path in config.get("file_paths", []):
-        candidate = os.path.join(base_path, folder_name)
-        resolved = ensure_candidate(candidate, base_path)
-        if resolved:
-            return resolved, created
-
-    return None, created
+    return resolved_path, created
 
 
 @app.route("/setup", methods=["GET", "POST"])
 def setup():
+    """Render and process the application setup form."""
+    # pylint: disable=too-many-locals,too-many-branches,too-many-return-statements
     config = load_config().copy()
     errors: List[str] = []
 

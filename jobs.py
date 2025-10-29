@@ -26,7 +26,7 @@ def now_iso() -> str:
 
 
 @dataclass
-class JobRecord:
+class JobRecord:  # pylint: disable=too-many-instance-attributes
     """Dataclass representing a single job entry stored on disk."""
 
     id: str
@@ -85,7 +85,7 @@ class JobRecord:
         return cls(**kwargs)
 
 
-class JobRepository:
+class JobRepository:  # pylint: disable=too-many-instance-attributes
     """Thread-safe JSON-backed job repository."""
 
     def __init__(self, path: str, *, max_items: int = 50, max_logs: int = 200) -> None:
@@ -107,7 +107,7 @@ class JobRepository:
                 raw = json.load(handle)
         except FileNotFoundError:
             raw = []
-        except Exception as exc:  # pragma: no cover - disk corruption
+        except (OSError, json.JSONDecodeError) as exc:  # pragma: no cover - disk issues
             print(f"Failed to load job history: {exc}")
             raw = []
         self._cache = [JobRecord.from_dict(entry) for entry in raw if isinstance(entry, dict)]
@@ -153,6 +153,8 @@ class JobRepository:
             return record.to_dict(include_logs=True)
 
     def list(self, *, include_logs: bool = False) -> List[Dict]:
+        """Return known jobs sorted by creation time."""
+
         with self._lock:
             self._ensure_loaded()
             items = [record.to_dict(include_logs=include_logs) for record in self._cache]
@@ -160,6 +162,8 @@ class JobRepository:
         return items
 
     def get(self, job_id: str, *, include_logs: bool = False) -> Optional[Dict]:
+        """Return a single job as a dictionary if it exists."""
+
         with self._lock:
             self._ensure_loaded()
             record = self._find_locked(job_id)
@@ -168,6 +172,8 @@ class JobRepository:
             return record.to_dict(include_logs=include_logs)
 
     def update(self, job_id: str, updates: Dict) -> Optional[Dict]:
+        """Apply updates to a job and return the refreshed payload."""
+
         with self._lock:
             self._ensure_loaded()
             record = self._find_locked(job_id)
@@ -179,7 +185,9 @@ class JobRepository:
                     progress_value = float(progress)
                 except (TypeError, ValueError):
                     progress_value = record.progress
-                record.progress = max(record.progress, max(0.0, min(100.0, progress_value)))
+                record.progress = max(
+                    record.progress, 0.0, min(100.0, progress_value)
+                )
             if "status" in updates:
                 record.status = str(updates["status"]) or record.status
             if "label" in updates and updates["label"]:
@@ -201,6 +209,8 @@ class JobRepository:
             return record.to_dict(include_logs=True)
 
     def append_logs(self, job_id: str, messages: Iterable[str]) -> None:
+        """Add log entries to a job, trimming history when needed."""
+
         payload = [str(message) for message in messages]
         if not payload:
             return
@@ -215,6 +225,8 @@ class JobRepository:
             self._touch_locked(record)
 
     def replace_last_log(self, job_id: str, message: str) -> None:
+        """Overwrite the most recent log entry for the job."""
+
         text = str(message)
         with self._lock:
             self._ensure_loaded()
@@ -228,6 +240,8 @@ class JobRepository:
             self._touch_locked(record)
 
     def mark_failure(self, job_id: str, message: str) -> Optional[Dict]:
+        """Flag a job as failed and record its completion."""
+
         return self.update(
             job_id,
             {
@@ -239,6 +253,8 @@ class JobRepository:
         )
 
     def mark_success(self, job_id: str) -> Optional[Dict]:
+        """Mark a job as successfully completed."""
+
         return self.update(
             job_id,
             {
@@ -249,7 +265,11 @@ class JobRepository:
             },
         )
 
-    def status(self, job_id: str, status: str, *, progress: Optional[float] = None) -> Optional[Dict]:
+    def status(
+        self, job_id: str, status: str, *, progress: Optional[float] = None
+    ) -> Optional[Dict]:
+        """Convenience helper to update status/progress fields."""
+
         updates: Dict = {"status": status}
         if status == "processing":
             updates.setdefault("started_at", now_iso())
