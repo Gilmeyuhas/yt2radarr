@@ -22,18 +22,39 @@ JOBS_PATH = os.path.join(CONFIG_BASE, "jobs.json")
 
 # Prefer higher bitrate HLS/H.264 streams before falling back to DASH/AV1.
 # YouTube often serves low bitrate AV1 streams as "best", so bias toward
-# muxed or H.264/AAC combinations at the highest available resolution.
+# muxed or H.264/AAC combinations at the highest available resolution and only
+# allow other codecs when no higher quality HLS/H.264 options are available.
 YTDLP_FORMAT_SELECTOR = (
     "bestvideo[height>=2160][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
     "bestvideo[height>=1440][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
     "bestvideo[height>=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
     "bestvideo[height>=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "95/"
     "bestvideo[height>=2160]+bestaudio/"
     "bestvideo[height>=1440]+bestaudio/"
     "bestvideo[height>=1080]+bestaudio/"
     "bestvideo[height>=720]+bestaudio/"
-    "95/best"
+    "best"
 )
+
+
+def _format_filesize(value: Optional[float]) -> str:
+    """Return a human-readable string for a byte size."""
+
+    if value is None:
+        return "unknown"
+    try:
+        size = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    if size <= 0:
+        return "unknown"
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    index = 0
+    while size >= 1024 and index < len(units) - 1:
+        size /= 1024
+        index += 1
+    return f"{size:.1f} {units[index]}"
 
 def _default_config() -> Dict:
     return {
@@ -573,11 +594,11 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             "-f",
             format_selector,
             "--skip-download",
-            "--print",
-            "%(format_id)s\t%(width)s\t%(height)s\t%(vcodec)s\t%(acodec)s\t%(filesize)s\t%(filesize_approx)s",
+            "--print-json",
             yt_url,
         ]
 
+        resolved_format: Dict[str, str] = {}
         try:
             info_result = subprocess.run(
                 info_command,
@@ -588,31 +609,90 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         except Exception as exc:  # pragma: no cover - command failure
             warn(f"Failed to query format details via yt-dlp: {exc}")
         else:
-            selection_line = ""
+            info_payload: Optional[Dict] = None
             for raw_line in info_result.stdout.splitlines():
                 stripped = raw_line.strip()
-                if stripped:
-                    selection_line = stripped
+                if not stripped:
+                    continue
+                try:
+                    info_payload = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                else:
                     break
-            if selection_line:
-                fields = selection_line.split("\t")
-                format_id = fields[0] if len(fields) > 0 and fields[0] != "None" else "unknown"
-                width = fields[1] if len(fields) > 1 and fields[1] not in ("", "None") else "unknown"
-                height = fields[2] if len(fields) > 2 and fields[2] not in ("", "None") else "unknown"
-                vcodec = fields[3] if len(fields) > 3 and fields[3] not in ("", "None") else "unknown"
-                acodec = fields[4] if len(fields) > 4 and fields[4] not in ("", "None") else "unknown"
-                filesize = "unknown"
-                if len(fields) > 5 and fields[5] not in ("", "None", "0"):
-                    filesize = fields[5]
-                elif len(fields) > 6 and fields[6] not in ("", "None", "0"):
-                    filesize = fields[6]
-                resolution = "unknown"
-                if width != "unknown" and height != "unknown":
-                    resolution = f"{width}x{height}"
+
+            if info_payload:
+                requested_formats = info_payload.get("requested_formats") or []
+                if requested_formats:
+                    video_format = next(
+                        (entry for entry in requested_formats if entry.get("vcodec") not in (None, "none")),
+                        None,
+                    )
+                    audio_format = next(
+                        (entry for entry in requested_formats if entry.get("acodec") not in (None, "none")),
+                        None,
+                    )
+                    format_ids = [
+                        entry.get("format_id")
+                        for entry in requested_formats
+                        if entry.get("format_id")
+                    ]
+                    width_value = None
+                    height_value = None
+                    if video_format:
+                        width_value = video_format.get("width") or info_payload.get("width")
+                        height_value = video_format.get("height") or info_payload.get("height")
+                    else:
+                        width_value = info_payload.get("width")
+                        height_value = info_payload.get("height")
+                    vcodec_value = (video_format or {}).get("vcodec") or info_payload.get("vcodec")
+                    acodec_value = (audio_format or {}).get("acodec") or info_payload.get("acodec")
+                    total_size: Optional[float] = None
+                    size_components: List[float] = []
+                    for entry in requested_formats:
+                        for key in ("filesize", "filesize_approx"):
+                            candidate = entry.get(key)
+                            if isinstance(candidate, (int, float)) and candidate > 0:
+                                size_components.append(float(candidate))
+                                break
+                    if size_components:
+                        total_size = sum(size_components)
+                    resolution = "unknown"
+                    if width_value and height_value:
+                        resolution = f"{int(width_value)}x{int(height_value)}"
+                    format_id_value = "+".join(format_ids) if format_ids else "unknown"
+                    resolved_format = {
+                        "format_id": format_id_value,
+                        "resolution": resolution,
+                        "video_codec": vcodec_value or "unknown",
+                        "audio_codec": acodec_value or "unknown",
+                        "filesize": _format_filesize(total_size),
+                    }
+                else:
+                    format_id_value = info_payload.get("format_id") or "unknown"
+                    width_value = info_payload.get("width")
+                    height_value = info_payload.get("height")
+                    resolution = "unknown"
+                    if width_value and height_value:
+                        resolution = f"{int(width_value)}x{int(height_value)}"
+                    resolved_format = {
+                        "format_id": str(format_id_value),
+                        "resolution": resolution,
+                        "video_codec": info_payload.get("vcodec") or "unknown",
+                        "audio_codec": info_payload.get("acodec") or "unknown",
+                        "filesize": _format_filesize(
+                            info_payload.get("filesize") or info_payload.get("filesize_approx")
+                        ),
+                    }
+
+            if resolved_format:
                 log(
                     "Resolved YouTube format: "
-                    f"id={format_id}, resolution={resolution}, video_codec={vcodec}, "
-                    f"audio_codec={acodec}, filesize={filesize}"
+                    f"id={resolved_format['format_id']}, "
+                    f"resolution={resolved_format['resolution']}, "
+                    f"video_codec={resolved_format['video_codec']}, "
+                    f"audio_codec={resolved_format['audio_codec']}, "
+                    f"filesize={resolved_format['filesize']}"
                 )
             else:
                 log("yt-dlp did not report a resolved format; proceeding with download.")
@@ -697,12 +777,37 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         if job_snapshot:
             metadata = list(job_snapshot.get("metadata") or [])
             updated_metadata: List[str] = []
+            def _should_keep(entry: object) -> bool:
+                if not isinstance(entry, str):
+                    return True
+                lowered = entry.lower()
+                prefixes = [
+                    "format:",
+                    "format id:",
+                    "resolution:",
+                    "video codec:",
+                    "audio codec:",
+                    "filesize:",
+                ]
+                return not any(lowered.startswith(prefix) for prefix in prefixes)
+
             for item in metadata:
-                if isinstance(item, str) and item.lower().startswith("format:"):
-                    continue
-                updated_metadata.append(item)
+                if _should_keep(item):
+                    updated_metadata.append(item)
+
             if actual_extension:
                 updated_metadata.append(f"Format: {actual_extension.upper()}")
+            if resolved_format.get("format_id"):
+                updated_metadata.append(f"Format ID: {resolved_format['format_id']}")
+            if resolved_format.get("resolution") and resolved_format["resolution"] != "unknown":
+                updated_metadata.append(f"Resolution: {resolved_format['resolution']}")
+            if resolved_format.get("video_codec") and resolved_format["video_codec"] != "unknown":
+                updated_metadata.append(f"Video Codec: {resolved_format['video_codec']}")
+            if resolved_format.get("audio_codec") and resolved_format["audio_codec"] != "unknown":
+                updated_metadata.append(f"Audio Codec: {resolved_format['audio_codec']}")
+            if resolved_format.get("filesize") and resolved_format["filesize"] != "unknown":
+                updated_metadata.append(f"Filesize: {resolved_format['filesize']}")
+
             jobs_repo.update(job_id, {"metadata": updated_metadata})
 
         if actual_extension:
