@@ -493,7 +493,10 @@ def _describe_job(payload: Dict) -> Dict:
     extra_type = (payload.get("extraType") or "trailer").strip().lower()
     extra_name = (payload.get("extra_name") or "").strip()
     merge_playlist = bool(payload.get("merge_playlist"))
-    playlist_mode = (payload.get("playlist_mode") or ("merge" if merge_playlist else "single")).strip().lower()
+    playlist_mode = (
+        payload.get("playlist_mode")
+        or ("merge" if merge_playlist else "single")
+    ).strip().lower()
     playlist_extra_types = [
         value
         for value in (
@@ -527,6 +530,81 @@ def _describe_job(payload: Dict) -> Dict:
     return {"label": label or "Radarr Download", "subtitle": subtitle, "metadata": metadata}
 
 
+ALLOWED_PLAYLIST_MODES = {"single", "merge", "extras"}
+
+
+def _collect_playlist_extra_types(
+    raw_values: Any, error: Callable[[str], None]
+) -> List[str]:
+    """Normalise playlist extra types while recording validation errors."""
+    if not isinstance(raw_values, list):
+        return []
+
+    collected: List[str] = []
+    for entry in raw_values:
+        normalized = normalize_extra_type_key(entry)
+        if normalized:
+            collected.append(normalized)
+        elif str(entry).strip():
+            error(f"Unknown playlist extra type '{entry}'.")
+    return collected
+
+
+def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
+    """Validate and sanitise the incoming create payload."""
+
+    yt_url = (data.get("yturl") or "").strip()
+    if not yt_url:
+        error("YouTube URL is required.")
+    elif not re.search(r"(youtube\.com|youtu\.be)/", yt_url):
+        error("Please provide a valid YouTube URL.")
+
+    movie_id = (data.get("movieId") or "").strip()
+    if not movie_id:
+        error("No movie selected. Please choose a movie from the suggestions list.")
+
+    playlist_mode = (data.get("playlist_mode") or "single").strip().lower()
+    if playlist_mode not in ALLOWED_PLAYLIST_MODES:
+        error("Invalid playlist handling option selected.")
+        playlist_mode = "single"
+
+    playlist_extra_types = _collect_playlist_extra_types(
+        data.get("playlist_extra_types"), error
+    )
+
+    extra_requested = bool(data.get("extra"))
+    extra_name = (data.get("extra_name") or "").strip()
+    if playlist_extra_types:
+        extra_requested = True
+    if playlist_mode == "extras":
+        if not extra_requested:
+            error("Playlist extras require storing the videos as extras.")
+        if not playlist_extra_types:
+            error("Provide at least one extra type for the playlist entries.")
+        extra_requested = True
+    elif extra_requested and not extra_name:
+        error("Extra name is required when storing in a subfolder.")
+
+    selected_extra_type = (data.get("extraType") or "trailer").strip().lower()
+    if playlist_mode == "extras" and playlist_extra_types:
+        selected_extra_type = playlist_extra_types[0]
+
+    return {
+        "yturl": yt_url,
+        "movieId": movie_id,
+        "movieName": (data.get("movieName") or "").strip(),
+        "title": (data.get("title") or "").strip(),
+        "year": (data.get("year") or "").strip(),
+        "tmdb": (data.get("tmdb") or "").strip(),
+        "extra": extra_requested,
+        "extraType": selected_extra_type,
+        "extra_name": extra_name,
+        "merge_playlist": playlist_mode == "merge",
+        "playlist_mode": playlist_mode,
+        "playlist_extra_types": playlist_extra_types,
+    }
+
+
 @app.route("/", methods=["GET"])
 def index():
     """Render the main application interface."""
@@ -553,66 +631,10 @@ def create():
         logs.append(f"ERROR: {message}")
         errors.append(message)
 
-    yt_url = (data.get("yturl") or "").strip()
-    if not yt_url:
-        error("YouTube URL is required.")
-    elif not re.search(r"(youtube\.com|youtu\.be)/", yt_url):
-        error("Please provide a valid YouTube URL.")
-
-    movie_id = (data.get("movieId") or "").strip()
-    if not movie_id:
-        error("No movie selected. Please choose a movie from the suggestions list.")
-
-    playlist_mode = (data.get("playlist_mode") or "single").strip().lower()
-    allowed_playlist_modes = {"single", "merge", "extras"}
-    if playlist_mode not in allowed_playlist_modes:
-        error("Invalid playlist handling option selected.")
-
-    raw_playlist_extra_types = data.get("playlist_extra_types")
-    playlist_extra_types: List[str] = []
-    if isinstance(raw_playlist_extra_types, list):
-        for entry in raw_playlist_extra_types:
-            normalized = normalize_extra_type_key(entry)
-            if normalized:
-                playlist_extra_types.append(normalized)
-            elif str(entry).strip():
-                error(f"Unknown playlist extra type '{entry}'.")
-
-    extra = bool(data.get("extra"))
-    extra_name = (data.get("extra_name") or "").strip()
-
-    if playlist_mode == "extras":
-        if not extra:
-            error("Playlist extras require storing the videos as extras.")
-        if not playlist_extra_types:
-            error("Provide at least one extra type for the playlist entries.")
-        extra = True
-    elif extra and not extra_name:
-        error("Extra name is required when storing in a subfolder.")
-
-    selected_extra_type = (data.get("extraType") or "trailer").strip().lower()
-    if playlist_mode == "extras" and playlist_extra_types:
-        selected_extra_type = playlist_extra_types[0]
-
-    merge_playlist = playlist_mode == "merge"
+    payload = _prepare_create_payload(data, error)
 
     if errors:
         return jsonify({"logs": logs}), 400
-
-    payload = {
-        "yturl": yt_url,
-        "movieId": movie_id,
-        "movieName": (data.get("movieName") or "").strip(),
-        "title": (data.get("title") or "").strip(),
-        "year": (data.get("year") or "").strip(),
-        "tmdb": (data.get("tmdb") or "").strip(),
-        "extra": extra,
-        "extraType": selected_extra_type,
-        "extra_name": extra_name,
-        "merge_playlist": merge_playlist,
-        "playlist_mode": playlist_mode,
-        "playlist_extra_types": playlist_extra_types,
-    }
 
     descriptors = _describe_job(payload)
     job_id = str(uuid.uuid4())
@@ -1295,25 +1317,22 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 fallback_type = "other"
             provided_count = len(playlist_extra_types)
             if provided_count and len(active_candidates) > provided_count:
+                fallback_label = EXTRA_TYPE_LABELS.get(
+                    fallback_type, fallback_type.capitalize()
+                )
                 warn(
-                    "Playlist contained {video_count} entries but only "
-                    "{type_count} extra types were supplied. Remaining entries "
-                    "will use '{fallback}'."
-                    .format(
-                        video_count=len(active_candidates),
-                        type_count=provided_count,
-                        fallback=EXTRA_TYPE_LABELS.get(
-                            fallback_type, fallback_type.capitalize()
-                        ),
-                    )
+                    "Playlist contained "
+                    f"{len(active_candidates)} entries but only {provided_count} "
+                    "extra types were supplied. Remaining entries will use "
+                    f"'{fallback_label}'."
                 )
 
             saved_paths: List[str] = []
 
-            for index, candidate in enumerate(active_candidates, start=1):
+            for entry_index, candidate in enumerate(active_candidates, start=1):
                 assigned_type = (
-                    playlist_extra_types[index - 1]
-                    if index - 1 < provided_count
+                    playlist_extra_types[entry_index - 1]
+                    if entry_index - 1 < provided_count
                     else fallback_type
                 )
                 if assigned_type not in allowed_extra_types:
