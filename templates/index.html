@@ -79,6 +79,15 @@
           </div>
           <input type="hidden" id="movieId" name="movieId" />
 
+          <div class="movie-feedback" id="movieFeedback" role="status" aria-live="polite" hidden></div>
+
+          <div class="movie-not-found" id="movieNotFoundPrompt" hidden>
+            <span>Movie not found. Add to Radarr?</span>
+            <button type="button" class="button-ghost" id="movieNotFoundButton">
+              Yes, search Radarr
+            </button>
+          </div>
+
           <div class="form-check">
             <input type="checkbox" id="extra" name="extra" />
             <label for="extra">Store in subfolder (treat as extra)</label>
@@ -168,6 +177,57 @@
     </div>
   </div>
 
+  <div id="addRadarrModal" class="modal" hidden>
+    <div class="modal-backdrop" id="addRadarrBackdrop" data-close-add-movie="true"></div>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="addRadarrTitle">
+      <div class="modal-header">
+        <h3 id="addRadarrTitle">Add movie to Radarr</h3>
+        <button
+          type="button"
+          class="button-ghost close-button"
+          data-close-add-movie="true"
+          aria-label="Close"
+        >
+          ×
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-search">
+          <label for="addRadarrSearch">Search for a movie title</label>
+          <div class="modal-search-input">
+            <input
+              type="text"
+              id="addRadarrSearch"
+              name="addRadarrSearch"
+              placeholder="Enter at least 2 characters"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button type="button" class="button-secondary" id="addRadarrSearchButton">
+              Search
+            </button>
+          </div>
+        </div>
+        <div id="addRadarrStatus" class="modal-status" role="status" aria-live="polite"></div>
+        <ul id="addRadarrResults" class="modal-results"></ul>
+        <div id="addRadarrPreview" class="modal-preview" hidden>
+          <div class="poster-wrapper">
+            <img id="addRadarrPoster" alt="Selected movie poster" hidden />
+          </div>
+          <div class="preview-details">
+            <h4 id="addRadarrPreviewTitle">Select a movie</h4>
+            <p id="addRadarrPreviewMeta" class="preview-meta"></p>
+            <p id="addRadarrPreviewOverview" class="preview-overview"></p>
+            <div class="modal-actions">
+              <button type="button" class="button-primary" id="addRadarrConfirm" disabled>
+                Add to Radarr
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
   <script src="{{ url_for('static', filename='script.js') }}" defer></script>
 </body>
 </html>
