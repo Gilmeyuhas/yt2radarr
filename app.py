@@ -10,12 +10,21 @@ import stat
 import subprocess
 import threading
 import uuid
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from glob import glob as glob_paths
 
 import requests  # pylint: disable=import-error
-from flask import Flask, jsonify, redirect, render_template, request, url_for  # pylint: disable=import-error
+from flask import (  # pylint: disable=import-error
+    Flask,
+    Response,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
 
 from jobs import JobRepository
 
@@ -381,6 +390,133 @@ def get_all_movies() -> List[Dict]:
         return []
 
 
+def _radarr_headers(config: Dict) -> Dict[str, str]:
+    """Return request headers required for Radarr API calls."""
+
+    return {"X-Api-Key": config["radarr_api_key"]}
+
+
+def _radarr_request(
+    method: str,
+    path: str,
+    *,
+    config: Optional[Dict] = None,
+    params: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> requests.Response:
+    """Execute a Radarr API request and raise for HTTP errors."""
+
+    cfg = config or load_config()
+    if not is_configured(cfg):
+        raise RuntimeError("Radarr has not been configured.")
+
+    url = f"{cfg['radarr_url']}{path}"
+    headers = _radarr_headers(cfg)
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+
+    response = requests.request(
+        method.upper(),
+        url,
+        headers=headers,
+        params=params,
+        json=payload,
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response
+
+
+def _lookup_tmdb_movie(tmdb_id: str, config: Dict) -> Optional[Dict]:
+    """Return Radarr lookup data for a TMDb identifier."""
+
+    if not tmdb_id:
+        return None
+
+    response = _radarr_request(
+        "GET",
+        "/api/v3/movie/lookup/tmdb",
+        config=config,
+        params={"tmdbId": tmdb_id},
+    )
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+
+    if isinstance(payload, list):
+        return payload[0] if payload else None
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
+def _load_radarr_library_options(config: Dict) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Fetch Radarr root folders and quality profiles."""
+
+    root_response = _radarr_request("GET", "/api/v3/rootFolder", config=config)
+    quality_response = _radarr_request("GET", "/api/v3/qualityProfile", config=config)
+
+    try:
+        root_payload = root_response.json()
+    except ValueError:
+        root_payload = []
+    try:
+        quality_payload = quality_response.json()
+    except ValueError:
+        quality_payload = []
+
+    root_folders: List[Dict[str, Any]] = []
+    for entry in root_payload or []:
+        if isinstance(entry, dict):
+            root_folders.append(entry)
+
+    quality_profiles: List[Dict[str, Any]] = []
+    for entry in quality_payload or []:
+        if isinstance(entry, dict):
+            quality_profiles.append(entry)
+
+    return root_folders, quality_profiles
+
+
+def _select_default_root_path(root_folders: List[Dict[str, Any]]) -> Optional[str]:
+    """Choose the default Radarr root folder path."""
+
+    candidates: List[Dict[str, Any]] = []
+    for entry in root_folders or []:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "").strip()
+        if not path:
+            continue
+        candidates.append({"path": path, "accessible": bool(entry.get("accessible", True))})
+
+    if not candidates:
+        return None
+
+    for entry in candidates:
+        if entry.get("accessible", True):
+            return entry["path"]
+
+    return candidates[0]["path"]
+
+
+def _select_default_quality_profile_id(quality_profiles: List[Dict[str, Any]]) -> Optional[int]:
+    """Choose the default Radarr quality profile identifier."""
+
+    for entry in quality_profiles or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            profile_id = int(entry.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if profile_id >= 0:
+            return profile_id
+    return None
+
+
 def sanitize_filename(name: str) -> str:
     """Sanitize a string to be safe as a filename."""
     sanitized = re.sub(r'[\\/:*?"<>|]+', "_", name)
@@ -581,6 +717,402 @@ def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
         "merge_playlist": playlist_mode == "merge",
         "playlist_mode": playlist_mode,
     }
+
+
+def _format_root_folder(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalise a Radarr root folder entry for the UI."""
+
+    path = str(entry.get("path") or "").strip()
+    return {
+        "id": entry.get("id"),
+        "name": entry.get("name") or path or "Root Folder",
+        "path": path,
+        "accessible": bool(entry.get("accessible", True)),
+        "freeSpace": entry.get("freeSpace"),
+    }
+
+
+def _format_quality_profile(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalise a Radarr quality profile entry for the UI."""
+
+    return {
+        "id": entry.get("id"),
+        "name": entry.get("name") or f"Profile {entry.get('id')}",
+    }
+
+
+@app.route("/radarr/options", methods=["GET"])
+def radarr_options():
+    """Return Radarr library options required for quick movie creation."""
+
+    config = load_config()
+    if not is_configured(config):
+        return jsonify({"error": "Application has not been configured yet."}), 503
+
+    try:
+        root_folders, quality_profiles = _load_radarr_library_options(config)
+    except requests.HTTPError as exc:  # pragma: no cover - depends on Radarr
+        response = exc.response
+        status = response.status_code if response is not None else 502
+        message = "Failed to load Radarr options."
+        if response is not None:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict):
+                message = payload.get("message") or payload.get("error") or message
+        return jsonify({"error": message}), status
+    except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network errors
+        return jsonify({"error": f"Failed to load Radarr options: {exc}"}), 502
+
+    formatted_roots = []
+    for entry in root_folders or []:
+        if isinstance(entry, dict):
+            formatted_roots.append(_format_root_folder(entry))
+
+    formatted_profiles = []
+    for entry in quality_profiles or []:
+        if isinstance(entry, dict):
+            formatted_profiles.append(_format_quality_profile(entry))
+
+    return jsonify(
+        {
+            "rootFolders": formatted_roots,
+            "qualityProfiles": formatted_profiles,
+        }
+    )
+
+
+class RadarrRequestError(Exception):
+    """Raised when a Radarr integration call cannot be completed."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+@dataclass(frozen=True)
+class RadarrMovieOptions:
+    """Configuration details required to create a Radarr movie."""
+
+    root_folder_path: str
+    quality_profile_id: int
+    monitored: bool
+    search: bool
+
+
+def _json_error(message: str, status: int) -> Tuple[Response, int]:
+    """Return a JSON error payload with the provided HTTP status."""
+
+    return jsonify({"error": message}), status
+
+
+def _require_configured() -> Dict:
+    """Ensure the application is configured before performing Radarr calls."""
+
+    config = load_config()
+    if not is_configured(config):
+        raise RadarrRequestError("Application has not been configured yet.", 503)
+    return config
+
+
+def _extract_radarr_error(response: Optional[requests.Response], default: str) -> str:
+    """Parse a Radarr error response for a useful message."""
+
+    if response is None:
+        return default
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        return payload.get("message") or payload.get("error") or default
+    return default
+
+
+def _raise_radarr_http_error(exc: requests.HTTPError, default: str) -> None:
+    """Convert a Radarr HTTP error into a RadarrRequestError."""
+
+    response = exc.response
+    status = response.status_code if response is not None else 502
+    message = _extract_radarr_error(response, default)
+    raise RadarrRequestError(message, status) from exc
+
+
+def _parse_tmdb_id(data: Dict[str, Any]) -> str:
+    """Extract and validate the TMDb identifier from the request payload."""
+
+    tmdb_id = str(data.get("tmdbId") or "").strip()
+    if not tmdb_id or not tmdb_id.isdigit():
+        message = "TMDb ID is required." if not tmdb_id else "TMDb ID must be numeric."
+        raise RadarrRequestError(message, 400)
+    return tmdb_id
+
+
+def _resolve_library_selection(
+    data: Dict[str, Any], config: Dict
+) -> Tuple[str, int, bool, bool]:
+    """Resolve root folder, quality profile, monitoring, and search defaults."""
+
+    root_folder_path = str(data.get("rootFolderPath") or "").strip()
+    quality_profile_id = _extract_quality_profile_id(data.get("qualityProfileId"))
+    monitored = bool(data.get("monitored", True))
+    search_flag = data.get("search")
+
+    needs_defaults = not root_folder_path or quality_profile_id is None
+    if needs_defaults:
+        root_folder_path, quality_profile_id = _load_default_library_options(
+            root_folder_path, quality_profile_id, config
+        )
+
+    if not root_folder_path:
+        raise RadarrRequestError(
+            "Radarr does not have any root folders configured.", 503
+        )
+    if quality_profile_id is None:
+        raise RadarrRequestError(
+            "Radarr does not have any quality profiles configured.", 503
+        )
+
+    search = bool(search_flag) if search_flag is not None else needs_defaults
+
+    return root_folder_path, int(quality_profile_id), monitored, search
+
+
+def _load_default_library_options(
+    root_folder_path: str, quality_profile_id: Optional[int], config: Dict
+) -> Tuple[str, int]:
+    """Fetch Radarr library options and select sensible defaults."""
+
+    try:
+        root_folders, quality_profiles = _load_radarr_library_options(config)
+    except requests.HTTPError as exc:  # pragma: no cover - depends on Radarr
+        _raise_radarr_http_error(exc, "Failed to load Radarr library options.")
+    except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network errors
+        raise RadarrRequestError(f"Failed to load Radarr options: {exc}", 502) from exc
+
+    resolved_root = root_folder_path or _select_default_root_path(root_folders) or ""
+    resolved_profile = (
+        quality_profile_id
+        if quality_profile_id is not None
+        else _select_default_quality_profile_id(quality_profiles)
+    )
+
+    if not resolved_root:
+        raise RadarrRequestError(
+            "Radarr does not have any root folders configured.", 503
+        )
+    if resolved_profile is None:
+        raise RadarrRequestError(
+            "Radarr does not have any quality profiles configured.", 503
+        )
+
+    return resolved_root, int(resolved_profile)
+
+
+def _fetch_movie_lookup(tmdb_id: str, config: Dict) -> Dict[str, Any]:
+    """Fetch movie lookup data from Radarr, raising helpful errors when unavailable."""
+
+    try:
+        lookup = _lookup_tmdb_movie(tmdb_id, config)
+    except requests.HTTPError as exc:  # pragma: no cover - depends on Radarr
+        _raise_radarr_http_error(exc, "Failed to query Radarr for lookup data.")
+    except requests.RequestException as exc:  # pragma: no cover - network errors
+        raise RadarrRequestError(f"Failed to query Radarr: {exc}", 502) from exc
+
+    if not lookup:
+        raise RadarrRequestError("Movie not found.", 404)
+
+    return lookup
+
+
+def _search_radarr_movies(query: str, config: Dict) -> List[Dict[str, Any]]:
+    """Run a Radarr lookup query and return the resulting payload."""
+
+    try:
+        response = _radarr_request(
+            "GET",
+            "/api/v3/movie/lookup",
+            config=config,
+            params={"term": query},
+        )
+    except requests.HTTPError as exc:  # pragma: no cover - depends on Radarr
+        _raise_radarr_http_error(exc, "Failed to search Radarr for movies.")
+    except requests.RequestException as exc:  # pragma: no cover - network errors
+        raise RadarrRequestError(f"Failed to search Radarr: {exc}", 502) from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:  # pragma: no cover - invalid JSON
+        raise RadarrRequestError(f"Failed to search Radarr: {exc}", 502) from exc
+
+    return payload if isinstance(payload, list) else []
+
+
+def _create_radarr_movie(payload: Dict[str, Any], config: Dict) -> Dict[str, Any]:
+    """Send a Radarr movie creation request and return the created record."""
+
+    try:
+        response = _radarr_request(
+            "POST", "/api/v3/movie", config=config, payload=payload
+        )
+    except requests.HTTPError as exc:  # pragma: no cover - depends on Radarr
+        _raise_radarr_http_error(exc, "Radarr rejected the movie creation request.")
+    except requests.RequestException as exc:  # pragma: no cover - network errors
+        raise RadarrRequestError(f"Failed to add movie to Radarr: {exc}", 502) from exc
+
+    try:
+        return response.json()
+    except ValueError as exc:  # pragma: no cover - invalid JSON
+        raise RadarrRequestError(f"Failed to add movie to Radarr: {exc}", 502) from exc
+
+
+def _build_movie_creation_payload(
+    lookup: Dict[str, Any], tmdb_id: str, options: RadarrMovieOptions
+) -> Dict[str, Any]:
+    """Build the payload Radarr expects when creating a movie."""
+
+    images = lookup.get("images") if isinstance(lookup.get("images"), list) else []
+    tags = lookup.get("tags") if isinstance(lookup.get("tags"), list) else []
+
+    return {
+        "title": lookup.get("title")
+        or lookup.get("originalTitle")
+        or lookup.get("sortTitle")
+        or "Untitled",
+        "qualityProfileId": options.quality_profile_id,
+        "titleSlug": lookup.get("titleSlug") or str(tmdb_id),
+        "tmdbId": int(lookup.get("tmdbId") or tmdb_id),
+        "year": lookup.get("year"),
+        "images": images,
+        "rootFolderPath": options.root_folder_path,
+        "monitored": options.monitored,
+        "minimumAvailability": lookup.get("minimumAvailability") or "released",
+        "addOptions": {"searchForMovie": bool(options.search)},
+        "tags": tags,
+    }
+
+
+@app.route("/radarr/search", methods=["GET"])
+def radarr_search():
+    """Search Radarr for movies using a text query."""
+
+    query = (request.args.get("query") or "").strip()
+    if len(query) < 2:
+        message = (
+            "Search query is required."
+            if not query
+            else "Search query must be at least 2 characters."
+        )
+        return _json_error(message, 400)
+
+    try:
+        config = _require_configured()
+        payload = _search_radarr_movies(query, config)
+    except RadarrRequestError as exc:
+        return _json_error(exc.message, exc.status)
+
+    results: List[Dict[str, Any]] = []
+    for entry in payload or []:
+        if not isinstance(entry, dict):
+            continue
+        tmdb_id = entry.get("tmdbId")
+        if tmdb_id is None:
+            continue
+        preview = _build_lookup_preview(entry, str(tmdb_id))
+        if preview.get("tmdbId"):
+            results.append(preview)
+
+    return jsonify({"results": results})
+
+
+def _build_lookup_preview(lookup: Dict[str, Any], tmdb_id: str) -> Dict[str, Any]:
+    """Transform Radarr lookup data into a preview payload."""
+
+    genres = lookup.get("genres") if isinstance(lookup.get("genres"), list) else []
+    return {
+        "title": lookup.get("title")
+        or lookup.get("originalTitle")
+        or lookup.get("sortTitle")
+        or "",
+        "year": lookup.get("year"),
+        "tmdbId": lookup.get("tmdbId") or tmdb_id,
+        "overview": lookup.get("overview") or "",
+        "runtime": lookup.get("runtime"),
+        "genres": genres,
+        "remotePoster": lookup.get("remotePoster") or "",
+        "images": lookup.get("images") if isinstance(lookup.get("images"), list) else [],
+        "titleSlug": lookup.get("titleSlug") or "",
+        "minimumAvailability": lookup.get("minimumAvailability") or "released",
+    }
+
+
+@app.route("/radarr/lookup", methods=["GET"])
+def radarr_lookup():
+    """Return preview details for a TMDb movie via Radarr."""
+
+    tmdb_id = (request.args.get("tmdbId") or "").strip()
+    if not tmdb_id or not tmdb_id.isdigit():
+        message = "TMDb ID is required." if not tmdb_id else "TMDb ID must be numeric."
+        return _json_error(message, 400)
+
+    try:
+        config = _require_configured()
+        lookup = _fetch_movie_lookup(tmdb_id, config)
+    except RadarrRequestError as exc:
+        return _json_error(exc.message, exc.status)
+
+    return jsonify({"movie": _build_lookup_preview(lookup, tmdb_id)})
+
+
+def _extract_quality_profile_id(raw: Any) -> Optional[int]:
+    """Convert incoming profile identifiers into integers."""
+
+    try:
+        if isinstance(raw, bool):
+            return None
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+@app.route("/radarr/movies", methods=["POST"])
+def radarr_add_movie():
+    """Create a new movie in Radarr from TMDb lookup data."""
+
+    data = request.get_json(silent=True) or {}
+    try:
+        config = _require_configured()
+        tmdb_id = _parse_tmdb_id(data)
+        root_folder_path, quality_profile_id, monitored, search = _resolve_library_selection(
+            data, config
+        )
+        options = RadarrMovieOptions(
+            root_folder_path=root_folder_path,
+            quality_profile_id=quality_profile_id,
+            monitored=monitored,
+            search=search,
+        )
+        lookup = _fetch_movie_lookup(tmdb_id, config)
+        payload = _build_movie_creation_payload(lookup, tmdb_id, options)
+        created = _create_radarr_movie(payload, config)
+    except RadarrRequestError as exc:
+        return _json_error(exc.message, exc.status)
+
+    _CACHE["movies"] = None
+
+    return jsonify(
+        {
+            "movie": {
+                "id": created.get("id"),
+                "title": created.get("title"),
+                "year": created.get("year"),
+                "tmdbId": created.get("tmdbId"),
+            }
+        }
+    )
 
 
 @app.route("/", methods=["GET"])
