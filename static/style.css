@@ -999,6 +999,11 @@ body[data-console-visible="false"] .side-column {
   color: #7ed27f;
 }
 
+.status-pill[data-status='cancelled'] {
+  background: rgba(158, 158, 158, 0.25);
+  color: #d0d0d0;
+}
+
 .status-pill[data-status='failed'] {
   background: rgba(244, 67, 54, 0.25);
   color: #ff8a80;
@@ -1025,6 +1030,10 @@ body[data-console-visible="false"] .side-column {
   background: linear-gradient(90deg, #4caf50, #2e7d32);
 }
 
+.download-item[data-status='cancelled'] .progress-fill {
+  background: linear-gradient(90deg, #bdbdbd, #757575);
+}
+
 .download-item[data-status='failed'] .progress-fill {
   background: linear-gradient(90deg, #ff6f61, #d84315);
 }
@@ -1037,9 +1046,51 @@ body[data-console-visible="false"] .side-column {
   color: #b0b0b0;
 }
 
+.download-item .item-footer-left {
+  flex: 1;
+}
+
+.download-item .item-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.download-item .item-timestamp {
+  opacity: 0.75;
+}
+
+.download-item .download-cancel-button {
+  font-size: 0.75em;
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid rgba(244, 67, 54, 0.45);
+  background: rgba(244, 67, 54, 0.18);
+  color: #ff9a92;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.download-item .download-cancel-button:hover:not(:disabled),
+.download-item .download-cancel-button:focus-visible:not(:disabled) {
+  background: rgba(244, 67, 54, 0.32);
+  border-color: rgba(244, 67, 54, 0.6);
+  color: #ffbeb8;
+  outline: none;
+}
+
+.download-item .download-cancel-button:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
 .download-item .download-error {
   font-size: 0.8em;
   color: #ff8a80;
+}
+
+.download-item[data-status='cancelled'] .download-error {
+  color: #d0d0d0;
 }
 
 /* Debug console styles */
