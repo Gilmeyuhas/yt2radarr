@@ -198,6 +198,20 @@ form {
   align-items: center;
   margin-bottom: 15px;
 }
+.movie-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.movie-input-wrapper input {
+  min-width: 0;
+}
+
+.movie-input-wrapper button {
+  white-space: nowrap;
+}
 .form-group label {
   width: 140px;
   margin-right: 10px;

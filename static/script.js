@@ -31,7 +31,10 @@ document.addEventListener('DOMContentLoaded', () => {
     addMoviePreviewMeta: document.getElementById('addRadarrPreviewMeta'),
     addMoviePreviewOverview: document.getElementById('addRadarrPreviewOverview'),
     addMovieConfirmButton: document.getElementById('addRadarrConfirm'),
-    addMovieCloseButtons: document.querySelectorAll('[data-close-add-movie]')
+    addMovieCloseButtons: document.querySelectorAll('[data-close-add-movie]'),
+    toggleConsoleButton: document.getElementById('toggleConsoleButton'),
+    sideColumn: document.getElementById('debugConsoleRegion'),
+    refreshLibraryButton: document.getElementById('refreshLibraryButton')
   };
 
   if (!elements.form) {
@@ -239,6 +242,37 @@ document.addEventListener('DOMContentLoaded', () => {
     option.setAttribute('data-year', year);
     option.setAttribute('data-tmdb', tmdbId);
     return option;
+  }
+
+  function replaceMovieOptions(movies) {
+    if (!elements.movieOptions) {
+      return;
+    }
+    elements.movieOptions.innerHTML = '';
+    if (!Array.isArray(movies) || !movies.length) {
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    movies.forEach(movie => {
+      if (!movie || typeof movie !== 'object') {
+        return;
+      }
+      const movieId = movie.id != null ? String(movie.id) : '';
+      if (!movieId) {
+        return;
+      }
+      const tmdbId = movie.tmdbId != null ? String(movie.tmdbId) : '';
+      const title = (movie.title || '').trim();
+      const year = movie.year != null ? String(movie.year).trim() : '';
+      const option = document.createElement('option');
+      option.value = buildMovieOptionValue({ title, year });
+      option.setAttribute('data-id', movieId);
+      option.setAttribute('data-title', title);
+      option.setAttribute('data-year', year);
+      option.setAttribute('data-tmdb', tmdbId);
+      fragment.appendChild(option);
+    });
+    elements.movieOptions.appendChild(fragment);
   }
 
   function setMovieFeedback(message, type = 'info') {
@@ -642,6 +676,45 @@ document.addEventListener('DOMContentLoaded', () => {
     updateMovieNotFoundPrompt();
     if (movie && movie.title) {
       appendConsoleLine(`Added movie to Radarr: ${buildMovieOptionValue(movie)}`);
+    }
+  }
+
+  async function refreshMovieLibrary() {
+    if (!elements.refreshLibraryButton) {
+      return;
+    }
+    const button = elements.refreshLibraryButton;
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Refreshing…';
+    setMovieFeedback('Refreshing Radarr movie library…', 'info');
+    try {
+      const response = await fetch('/radarr/movies/refresh', { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = data && data.error
+          ? data.error
+          : `Failed to refresh Radarr library (HTTP ${response.status}).`;
+        setMovieFeedback(message, 'error');
+        return;
+      }
+      const movies = Array.isArray(data.movies) ? data.movies : [];
+      replaceMovieOptions(movies);
+      syncMovieSelection();
+      const count = movies.length;
+      if (count > 0) {
+        const label = count === 1 ? 'movie' : 'movies';
+        setMovieFeedback(`Loaded ${count} ${label} from Radarr.`, 'success');
+      } else {
+        setMovieFeedback('No movies were returned from Radarr.', 'warning');
+      }
+      appendConsoleLine('Refreshed Radarr movie library.');
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err || 'Unknown error');
+      setMovieFeedback(`Failed to refresh Radarr library: ${message}`, 'error');
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel || 'Refresh Library';
     }
   }
 
@@ -1216,6 +1289,12 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (err) {
       appendConsoleLine(`ERROR: Failed to load job history: ${err && err.message ? err.message : err}`, 'error');
     }
+  }
+
+  if (elements.refreshLibraryButton) {
+    elements.refreshLibraryButton.addEventListener('click', () => {
+      refreshMovieLibrary();
+    });
   }
 
   if (elements.movieNameInput) {
