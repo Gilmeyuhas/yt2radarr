@@ -12,7 +12,10 @@
   />
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
 </head>
-<body data-debug-mode="{{ 'true' if debug_mode else 'false' }}">
+<body
+  data-debug-mode="{{ 'true' if debug_mode else 'false' }}"
+  data-console-visible="true"
+>
   <div class="app-shell">
     <div class="header">
       <div class="brand">
@@ -24,6 +27,15 @@
         <h1>YT2Radarr - Radarr YouTube Video Importer</h1>
       </div>
       <div class="header-actions">
+        <button
+          type="button"
+          id="toggleConsoleButton"
+          class="button-secondary toggle-console-button"
+          aria-controls="debugConsoleRegion"
+          aria-expanded="true"
+        >
+          Hide Console
+        </button>
         <a class="link-button" href="{{ url_for('setup') }}">Settings</a>
       </div>
     </div>
@@ -155,7 +167,7 @@
         </section>
       </div>
 
-      <aside class="side-column">
+      <aside class="side-column" id="debugConsoleRegion">
         <div class="console-header">
           <h2>Debug Console</h2>
           <button type="button" id="copyLogButton" class="copy-log-button" hidden>Copy Full Log</button>
