@@ -28,6 +28,23 @@ from flask import (  # pylint: disable=import-error
 
 from jobs import JobRepository
 
+
+@dataclass
+class JobControl:
+    """Track runtime details for an active download worker."""
+
+    thread: threading.Thread
+    cancel_event: threading.Event
+    process: Optional[subprocess.Popen] = None
+
+
+class JobCancelled(Exception):
+    """Raised when a download job has been cancelled by the user."""
+
+
+_JOB_CONTROLS: Dict[str, JobControl] = {}
+_JOB_CONTROLS_LOCK = threading.Lock()
+
 app = Flask(__name__)
 
 CONFIG_BASE = os.environ.get("YT2RADARR_CONFIG_DIR", os.path.dirname(__file__))
@@ -104,9 +121,88 @@ def _mark_job_success(job_id: str) -> None:
     jobs_repo.mark_success(job_id)
 
 
+def _mark_job_cancelled(job_id: str, message: str = "Job cancelled by user.") -> None:
+    """Mark the specified job as cancelled."""
+
+    jobs_repo.mark_cancelled(job_id, message)
+
+
 def _job_status(job_id: str, status: str, progress: Optional[float] = None) -> None:
     """Persist a status update for a job."""
     jobs_repo.status(job_id, status, progress=progress)
+
+
+def _register_job_control(
+    job_id: str, worker: threading.Thread, cancel_event: threading.Event
+) -> None:
+    """Store the worker and cancellation event for an active job."""
+
+    control = JobControl(thread=worker, cancel_event=cancel_event)
+    with _JOB_CONTROLS_LOCK:
+        _JOB_CONTROLS[job_id] = control
+
+
+def _set_job_process(job_id: str, process: Optional[subprocess.Popen]) -> None:
+    """Record the active subprocess for a running job."""
+
+    with _JOB_CONTROLS_LOCK:
+        control = _JOB_CONTROLS.get(job_id)
+        if control is not None:
+            control.process = process
+
+
+def _clear_job_process(job_id: str) -> None:
+    """Clear any tracked subprocess for the specified job."""
+
+    with _JOB_CONTROLS_LOCK:
+        control = _JOB_CONTROLS.get(job_id)
+        if control is not None:
+            control.process = None
+
+
+def _unregister_job_control(job_id: str) -> None:
+    """Remove tracking information for a completed job."""
+
+    with _JOB_CONTROLS_LOCK:
+        _JOB_CONTROLS.pop(job_id, None)
+
+
+def _terminate_process(process: Optional[subprocess.Popen]) -> None:
+    """Attempt to gracefully stop a running subprocess."""
+
+    if process is None:
+        return
+    try:
+        process.terminate()
+    except OSError:
+        return
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _cleanup_temp_files(pattern: Optional[str]) -> None:
+    """Remove temporary download fragments produced by yt-dlp."""
+
+    if not pattern:
+        return
+    for leftover in glob_paths(pattern):
+        if leftover.endswith((".part", ".ytdl")):
+            try:
+                os.remove(leftover)
+            except OSError:
+                continue
+
+
+def _cleanup_playlist_dir(path: Optional[str]) -> None:
+    """Remove the temporary playlist staging directory if it exists."""
+
+    if path and os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
 
 
 _NOISY_WARNING_SNIPPETS = (
@@ -1164,7 +1260,13 @@ def create():
         }
     )
 
-    worker = threading.Thread(target=process_download_job, args=(job_id, payload), daemon=True)
+    cancel_event = threading.Event()
+    worker = threading.Thread(
+        target=process_download_job,
+        args=(job_id, payload, cancel_event),
+        daemon=True,
+    )
+    _register_job_control(job_id, worker, cancel_event)
     worker.start()
 
     display_job = dict(job_record)
@@ -1175,7 +1277,9 @@ def create():
     return jsonify({"job": display_job, "debug_mode": config.get("debug_mode", False)}), 202
 
 
-def process_download_job(job_id: str, payload: Dict) -> None:
+def process_download_job(
+    job_id: str, payload: Dict, cancel_event: threading.Event
+) -> None:
     """Execute the yt-dlp workflow for a queued job."""
     # pylint: disable=too-many-locals,too-many-branches,too-many-nested-blocks
     # pylint: disable=too-many-statements,too-many-return-statements
@@ -1192,12 +1296,31 @@ def process_download_job(job_id: str, payload: Dict) -> None:
     def debug(message: str) -> None:
         append_job_log(job_id, f"DEBUG: {message}")
 
+    cancellation_logged = False
+    playlist_temp_dir: Optional[str] = None
+    expected_pattern: Optional[str] = None
+    downloaded_candidates: List[str] = []
+    merge_playlist = False
+
+    def acknowledge_cancellation() -> None:
+        nonlocal cancellation_logged
+        if not cancellation_logged:
+            append_job_log(job_id, "Cancellation acknowledged; stopping job.")
+            cancellation_logged = True
+
+    def ensure_not_cancelled() -> None:
+        if cancel_event.is_set():
+            acknowledge_cancellation()
+            raise JobCancelled()
+
     try:
         _job_status(job_id, "processing", progress=1)
         config = load_config()
         if not is_configured(config):
             fail("Application has not been configured yet.")
             return
+
+        ensure_not_cancelled()
 
         debug_enabled = bool(config.get("debug_mode"))
         compact_progress_logs = not debug_enabled
@@ -1253,6 +1376,8 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             },
         )
 
+        ensure_not_cancelled()
+
         extra = bool(payload.get("extra"))
         extra_name = (payload.get("extra_name") or "").strip()
         try:
@@ -1281,6 +1406,8 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             log(f"Created movie folder at '{movie_path}'.")
         log(f"Movie path resolved to '{movie_path}'.")
         _job_status(job_id, "processing", progress=10)
+
+        ensure_not_cancelled()
 
         folder_map = {
             "trailer": "Trailers",
@@ -1334,6 +1461,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 if cookie_path:
                     yt_cmd += ["--cookies", cookie_path]
                 yt_cmd.append(yt_url)
+                ensure_not_cancelled()
                 proc = subprocess.run(
                     yt_cmd,
                     capture_output=True,
@@ -1369,6 +1497,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 if cookie_path:
                     yt_cmd += ["--cookies", cookie_path]
                 yt_cmd.append(yt_url)
+                ensure_not_cancelled()
                 proc = subprocess.run(
                     yt_cmd,
                     capture_output=True,
@@ -1414,7 +1543,6 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 suffix_index += 1
 
         template_base = filename_base.replace("%", "%%")
-        playlist_temp_dir: Optional[str] = None
         if merge_playlist:
             playlist_temp_dir = os.path.join(target_dir, f".yt2radarr_playlist_{job_id}")
             os.makedirs(playlist_temp_dir, exist_ok=True)
@@ -1455,6 +1583,8 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         ]
 
         resolved_format: Dict[str, str] = {}
+        ensure_not_cancelled()
+
         try:
             info_result = subprocess.run(
                 info_command,
@@ -1629,6 +1759,9 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 return
             log(line)
 
+        ensure_not_cancelled()
+
+        return_code = 0
         try:
             with subprocess.Popen(
                 command,
@@ -1638,8 +1771,24 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 bufsize=1,
                 cwd=target_dir,
             ) as process:
+                _set_job_process(job_id, process)
                 assert process.stdout is not None
                 for raw_line in process.stdout:
+                    if cancel_event.is_set():
+                        acknowledge_cancellation()
+                        try:
+                            process.terminate()
+                        except OSError:
+                            pass
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                process.kill()
+                            except OSError:
+                                pass
+                        _cleanup_temp_files(expected_pattern)
+                        raise JobCancelled()
                     line = raw_line.rstrip()
                     if not line:
                         continue
@@ -1648,17 +1797,14 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         except (OSError, ValueError) as exc:  # pragma: no cover - command failure
             fail(f"Failed to invoke yt-dlp: {exc}")
             return
+        finally:
+            _clear_job_process(job_id)
 
         if return_code != 0:
             failure_summary = output_lines[-1] if output_lines else "Download failed."
             log(f"yt-dlp exited with code {return_code}.")
 
-            for leftover in glob_paths(expected_pattern):
-                if leftover.endswith(".part") or leftover.endswith(".ytdl"):
-                    try:
-                        os.remove(leftover)
-                    except OSError:
-                        continue
+            _cleanup_temp_files(expected_pattern)
 
             fail(f"Download failed: {failure_summary[:300]}")
             return
@@ -1668,6 +1814,16 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             for path in glob_paths(expected_pattern)
             if os.path.isfile(path) and not path.endswith((".part", ".ytdl"))
         ]
+
+        if cancel_event.is_set():
+            acknowledge_cancellation()
+            for candidate in list(downloaded_candidates):
+                try:
+                    os.remove(candidate)
+                except OSError:
+                    continue
+            _cleanup_temp_files(expected_pattern)
+            raise JobCancelled()
 
         def _is_intermediate_file(name: str) -> bool:
             base = os.path.basename(name)
@@ -1697,6 +1853,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 return value.replace("\\", "\\\\").replace("'", "\\'")
 
             concat_manifest = os.path.join(playlist_temp_dir, "concat.txt")
+            ensure_not_cancelled()
             try:
                 with open(concat_manifest, "w", encoding="utf-8") as handle:
                     for candidate in downloaded_candidates:
@@ -1724,25 +1881,45 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 merged_output_path,
             ]
 
+            ensure_not_cancelled()
+
+            stdout_data = ""
+            stderr_data = ""
+            merge_returncode = 0
             try:
-                merge_result = subprocess.run(
+                with subprocess.Popen(
                     merge_command,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    check=False,
-                )
+                ) as merge_process:
+                    _set_job_process(job_id, merge_process)
+                    try:
+                        stdout_data, stderr_data = merge_process.communicate()
+                    finally:
+                        _clear_job_process(job_id)
+                    merge_returncode = merge_process.returncode
             except (OSError, ValueError) as exc:
                 fail(f"Failed to invoke ffmpeg for playlist merge: {exc}")
                 return
 
-            if merge_result.stdout:
-                for line in merge_result.stdout.strip().splitlines():
+            if stdout_data:
+                for line in stdout_data.strip().splitlines():
                     debug(f"ffmpeg: {line}")
-            if merge_result.stderr:
-                for line in merge_result.stderr.strip().splitlines():
+            if stderr_data:
+                for line in stderr_data.strip().splitlines():
                     debug(f"ffmpeg: {line}")
 
-            if merge_result.returncode != 0 or not os.path.exists(merged_output_path):
+            if cancel_event.is_set():
+                acknowledge_cancellation()
+                if os.path.exists(merged_output_path):
+                    try:
+                        os.remove(merged_output_path)
+                    except OSError:
+                        pass
+                raise JobCancelled()
+
+            if merge_returncode != 0 or not os.path.exists(merged_output_path):
                 fail("Failed to merge playlist videos into a single file.")
                 return
 
@@ -1762,6 +1939,15 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     continue
 
             downloaded_candidates = [merged_output_path]
+
+            if cancel_event.is_set():
+                acknowledge_cancellation()
+                for candidate in list(downloaded_candidates):
+                    try:
+                        os.remove(candidate)
+                    except OSError:
+                        continue
+                raise JobCancelled()
 
 
         final_candidates = [
@@ -1851,6 +2037,15 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             )
             return
 
+        if cancel_event.is_set():
+            acknowledge_cancellation()
+            try:
+                if os.path.exists(target_path):
+                    os.remove(target_path)
+            except OSError:
+                pass
+            raise JobCancelled()
+
         for leftover in downloaded_candidates:
             if os.path.abspath(leftover) == os.path.abspath(target_path):
                 continue
@@ -1870,10 +2065,64 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         _job_status(job_id, "processing", progress=100)
         log(f"Success! Video saved as '{target_path}'.")
         _mark_job_success(job_id)
+    except JobCancelled:
+        _cleanup_temp_files(expected_pattern)
+        for candidate in list(downloaded_candidates):
+            try:
+                os.remove(candidate)
+            except OSError:
+                continue
+        _cleanup_playlist_dir(playlist_temp_dir)
+        append_job_log(job_id, "Job cancelled.")
+        _mark_job_cancelled(job_id)
     # pylint: disable=broad-exception-caught
     except Exception as exc:  # pragma: no cover - unexpected failure
         fail(f"Unexpected error: {exc}")
     # pylint: enable=broad-exception-caught
+    finally:
+        _clear_job_process(job_id)
+        _unregister_job_control(job_id)
+
+
+@app.route("/jobs/<job_id>/cancel", methods=["POST"])
+def cancel_job(job_id: str):
+    """Request cancellation for an active job."""
+
+    job = jobs_repo.get(job_id)
+    if job is None:
+        return jsonify({"error": "Job not found."}), 404
+
+    status = str(job.get("status") or "").lower()
+    if status not in {"queued", "processing"}:
+        return (
+            jsonify({"job": job, "message": "Job is not active and cannot be cancelled."}),
+            409,
+        )
+
+    process_to_terminate: Optional[subprocess.Popen] = None
+    already_requested = False
+    with _JOB_CONTROLS_LOCK:
+        control = _JOB_CONTROLS.get(job_id)
+        if control is None:
+            return (
+                jsonify({"job": job, "message": "Job worker is no longer active."}),
+                409,
+            )
+        already_requested = control.cancel_event.is_set()
+        control.cancel_event.set()
+        process_to_terminate = control.process
+
+    if process_to_terminate is not None:
+        _terminate_process(process_to_terminate)
+
+    message = "Cancellation already requested." if already_requested else "Cancellation requested."
+
+    if not already_requested:
+        append_job_log(job_id, "Cancellation requested by user.")
+        jobs_repo.update(job_id, {"message": "Cancelling..."})
+
+    updated_job = jobs_repo.get(job_id) or job
+    return jsonify({"job": updated_job, "message": message}), 202
 
 
 @app.route("/jobs", methods=["GET"])
