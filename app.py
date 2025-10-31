@@ -724,7 +724,14 @@ def normalize_extra_type_key(raw_value: str) -> Optional[str]:
 def _describe_job(payload: Dict) -> Dict:
     """Build presentation metadata for a job payload."""
     movie_label = (payload.get("movieName") or payload.get("title") or "").strip()
+    standalone = bool(payload.get("standalone"))
     if not movie_label:
+        movie_label = "Standalone Download" if standalone else "Selected Movie"
+    if standalone and movie_label == "Standalone Download":
+        override_title = (payload.get("title") or "").strip()
+        if override_title:
+            movie_label = override_title
+    if not standalone and movie_label == "Standalone Download":
         movie_label = "Selected Movie"
     extra = bool(payload.get("extra"))
     extra_type = (payload.get("extraType") or "trailer").strip().lower()
@@ -748,6 +755,8 @@ def _describe_job(payload: Dict) -> Dict:
         metadata.append("Stored as extra content")
     if merge_playlist:
         metadata.append("Playlist merged into single file")
+    if standalone:
+        metadata.append("Standalone download (outside Radarr)")
     return {"label": label or "Radarr Download", "subtitle": subtitle, "metadata": metadata}
 
 
@@ -805,13 +814,25 @@ def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
 
     playlist_mode = _resolve_playlist_mode(data, error)
 
+    standalone = bool(data.get("standalone"))
+
     extra_requested, extra_name, selected_extra_type = _resolve_extra_settings(
         data, error
     )
 
+    if standalone:
+        extra_requested = False
+        extra_name = ""
+        selected_extra_type = "other"
+
+    if standalone:
+        movie_id = (data.get("movieId") or "").strip()
+    else:
+        movie_id = _validate_movie_selection(data, error)
+
     return {
         "yturl": _validate_request_urls(data, error),
-        "movieId": _validate_movie_selection(data, error),
+        "movieId": movie_id,
         "movieName": (data.get("movieName") or "").strip(),
         "title": (data.get("title") or "").strip(),
         "year": (data.get("year") or "").strip(),
@@ -821,6 +842,7 @@ def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
         "extra_name": extra_name,
         "merge_playlist": playlist_mode == "merge",
         "playlist_mode": playlist_mode,
+        "standalone": standalone,
     }
 
 
@@ -1383,11 +1405,8 @@ def process_download_job(
         payload["playlist_mode"] = playlist_mode
         payload["merge_playlist"] = merge_playlist
 
-        resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
-        if resolved is None or not str(resolved.get("id")):
-            fail("No movie selected. Please choose a movie from the suggestions list.")
-            return
-        movie_id = str(resolved.get("id"))
+        standalone = bool(payload.get("standalone"))
+        payload["standalone"] = standalone
 
         extra_type = (payload.get("extraType") or "trailer").strip().lower()
         allowed_extra_types = {
@@ -1418,74 +1437,100 @@ def process_download_job(
 
         ensure_not_cancelled()
 
-        extra = bool(payload.get("extra"))
-        extra_name = (payload.get("extra_name") or "").strip()
-        try:
-            log(f"Fetching Radarr details for movie ID {movie_id}.")
-            response = requests.get(
-                f"{config['radarr_url']}/api/v3/movie/{movie_id}",
-                headers={"X-Api-Key": config["radarr_api_key"]},
-                timeout=10,
-            )
-            response.raise_for_status()
-            movie = response.json()
-        except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network errors
-            fail(f"Could not retrieve movie info from Radarr (ID {movie_id}): {exc}")
-            return
+        extra = bool(payload.get("extra")) and not standalone
+        extra_name = (payload.get("extra_name") or "").strip() if extra else ""
+        payload["extra"] = extra
+        payload["extra_name"] = extra_name
+        jobs_repo.update(job_id, {"request": payload})
 
-        movie_path = movie.get("path")
-        resolved_path, created_folder = resolve_movie_path(
-            movie_path, config, create_if_missing=True
-        )
-        if resolved_path is None:
-            fail(f"Movie folder not found on disk: {movie_path}")
-            return
+        movie: Dict[str, Any] = {}
+        target_dir = ""
+        canonical_stem = ""
+        standalone_base_path: Optional[str] = None
 
-        movie_path = resolved_path
-        if created_folder:
-            log(f"Created movie folder at '{movie_path}'.")
-        log(f"Movie path resolved to '{movie_path}'.")
-        _job_status(job_id, "processing", progress=10)
-
-        ensure_not_cancelled()
-
-        folder_map = {
-            "trailer": "Trailers",
-            "behindthescenes": "Behind The Scenes",
-            "deleted": "Deleted Scenes",
-            "featurette": "Featurettes",
-            "interview": "Interviews",
-            "scene": "Scenes",
-            "short": "Shorts",
-            "other": "Other",
-        }
-
-        target_dir = movie_path
-        if extra:
-            subfolder = folder_map.get(extra_type, extra_type.capitalize() + "s")
-            target_dir = os.path.join(movie_path, subfolder)
-            os.makedirs(target_dir, exist_ok=True)
-            log(f"Storing video in subfolder '{subfolder}'.")
+        if standalone:
+            standalone_base_path = _select_standalone_library_path(config)
+            if standalone_base_path is None:
+                fail("Standalone downloads require at least one accessible library path.")
+                return
+            log("Standalone download requested; skipping Radarr library lookup.")
+            log(f"Standalone base path resolved to '{standalone_base_path}'.")
+            target_dir = standalone_base_path
+            _job_status(job_id, "processing", progress=10)
         else:
-            log("Treating video as main video file.")
+            resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
+            if resolved is None or not str(resolved.get("id")):
+                fail("No movie selected. Please choose a movie from the suggestions list.")
+                return
+            movie_id = str(resolved.get("id"))
+            payload["movieId"] = movie_id
+            jobs_repo.update(job_id, {"request": payload})
+
+            try:
+                log(f"Fetching Radarr details for movie ID {movie_id}.")
+                response = requests.get(
+                    f"{config['radarr_url']}/api/v3/movie/{movie_id}",
+                    headers={"X-Api-Key": config["radarr_api_key"]},
+                    timeout=10,
+                )
+                response.raise_for_status()
+                movie = response.json()
+            except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network errors
+                fail(f"Could not retrieve movie info from Radarr (ID {movie_id}): {exc}")
+                return
+
+            movie_path = movie.get("path")
+            resolved_path, created_folder = resolve_movie_path(
+                movie_path, config, create_if_missing=True
+            )
+            if resolved_path is None:
+                fail(f"Movie folder not found on disk: {movie_path}")
+                return
+
+            movie_path = resolved_path
+            if created_folder:
+                log(f"Created movie folder at '{movie_path}'.")
+            log(f"Movie path resolved to '{movie_path}'.")
+            _job_status(job_id, "processing", progress=10)
+
+            ensure_not_cancelled()
+
+            folder_map = {
+                "trailer": "Trailers",
+                "behindthescenes": "Behind The Scenes",
+                "deleted": "Deleted Scenes",
+                "featurette": "Featurettes",
+                "interview": "Interviews",
+                "scene": "Scenes",
+                "short": "Shorts",
+                "other": "Other",
+            }
+
+            target_dir = movie_path
+            if extra:
+                subfolder = folder_map.get(extra_type, extra_type.capitalize() + "s")
+                target_dir = os.path.join(movie_path, subfolder)
+                os.makedirs(target_dir, exist_ok=True)
+                log(f"Storing video in subfolder '{subfolder}'.")
+            else:
+                log("Treating video as main video file.")
+
+            movie_stem = build_movie_stem(movie)
+            log(f"Resolved Radarr movie stem to '{movie_stem}'.")
+
+            canonical_stem = movie_stem
+            if extra:
+                extra_label = sanitize_filename(extra_name) or EXTRA_TYPE_LABELS.get(
+                    extra_type, extra_type.capitalize()
+                )
+                if extra_label:
+                    canonical_stem = f"{movie_stem} {extra_label}"
+                    log(f"Using extra label '{extra_label}'.")
 
         if merge_playlist:
             log("Playlist download requested; videos will be merged into a single file.")
 
-        movie_stem = build_movie_stem(movie)
-        log(f"Resolved Radarr movie stem to '{movie_stem}'.")
-
-        canonical_stem = movie_stem
-        extra_label = ""
-        if extra:
-            extra_label = sanitize_filename(extra_name) or EXTRA_TYPE_LABELS.get(
-                extra_type, extra_type.capitalize()
-            )
-            if extra_label:
-                canonical_stem = f"{movie_stem} {extra_label}"
-                log(f"Using extra label '{extra_label}'.")
-
-        descriptive = extra_name
+        descriptive = extra_name if extra else ""
         default_label = "Playlist" if merge_playlist else "Video"
         if descriptive:
             log(f"Using custom descriptive name '{descriptive}'.")
@@ -1569,6 +1614,25 @@ def process_download_job(
             filename_base = descriptive
 
         filename_base = filename_base or "Video"
+
+        if standalone:
+            folder_name = filename_base
+            if standalone_base_path is None:
+                fail("Standalone downloads require a configured library path.")
+                return
+            target_dir = os.path.join(standalone_base_path, folder_name)
+            created_new = not os.path.isdir(target_dir)
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except OSError as exc:
+                fail(f"Failed to create standalone folder '{target_dir}': {exc}")
+                return
+            if created_new:
+                log(f"Created standalone folder at '{target_dir}'.")
+            else:
+                log(f"Standalone folder resolved to '{target_dir}'.")
+            canonical_stem = folder_name
+
         pattern = os.path.join(target_dir, f"{filename_base}.*")
         if any(os.path.exists(path) for path in glob_paths(pattern)):
             log(f"File stem '{filename_base}' already exists. Searching for a free filename.")
@@ -2215,6 +2279,18 @@ def _resolve_override_target(
         if resolved:
             return resolved
 
+    return None
+
+
+def _select_standalone_library_path(config: Dict) -> Optional[str]:
+    """Return the first accessible library path for standalone downloads."""
+
+    for entry in config.get("file_paths", []):
+        candidate = str(entry or "").strip()
+        if not candidate:
+            continue
+        if os.path.isdir(candidate):
+            return candidate
     return None
 
 
