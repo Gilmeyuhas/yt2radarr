@@ -375,19 +375,28 @@ def get_all_movies() -> List[Dict]:
         return []
 
     try:
-        response = requests.get(
-            f"{config['radarr_url']}/api/v3/movie",
-            headers={"X-Api-Key": config["radarr_api_key"]},
-            timeout=10,
-        )
-        response.raise_for_status()
-        movies = response.json()
-        movies.sort(key=lambda movie: movie.get("title", "").lower())
+        movies = _fetch_radarr_movies(config)
         _CACHE["movies"] = movies
         return movies
     except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network errors
         print(f"Error fetching movies from Radarr: {exc}")
         return []
+
+
+def _fetch_radarr_movies(config: Dict) -> List[Dict]:
+    """Return the full list of movies from Radarr sorted alphabetically."""
+
+    response = requests.get(
+        f"{config['radarr_url']}/api/v3/movie",
+        headers={"X-Api-Key": config["radarr_api_key"]},
+        timeout=10,
+    )
+    response.raise_for_status()
+    movies = response.json()
+    if not isinstance(movies, list):
+        raise ValueError("Radarr returned an invalid movie list.")
+    movies.sort(key=lambda movie: str(movie.get("title", "")).lower())
+    return movies
 
 
 def _radarr_headers(config: Dict) -> Dict[str, str]:
@@ -1076,6 +1085,37 @@ def _extract_quality_profile_id(raw: Any) -> Optional[int]:
         return int(raw)
     except (TypeError, ValueError):
         return None
+
+
+@app.route("/radarr/movies/refresh", methods=["POST"])
+def radarr_refresh_movies() -> Response:
+    """Force refresh the cached Radarr movie library."""
+
+    try:
+        config = _require_configured()
+    except RadarrRequestError as exc:
+        return _json_error(exc.message, exc.status)
+
+    try:
+        movies = _fetch_radarr_movies(config)
+        _CACHE["movies"] = movies
+    except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network errors
+        print(f"Error refreshing movies from Radarr: {exc}")
+        return _json_error("Failed to refresh Radarr movies.", 502)
+
+    payload: List[Dict[str, Any]] = []
+    for movie in movies:
+        if isinstance(movie, dict):
+            payload.append(
+                {
+                    "id": movie.get("id"),
+                    "title": movie.get("title"),
+                    "year": movie.get("year"),
+                    "tmdbId": movie.get("tmdbId"),
+                }
+            )
+
+    return jsonify({"movies": payload})
 
 
 @app.route("/radarr/movies", methods=["POST"])
