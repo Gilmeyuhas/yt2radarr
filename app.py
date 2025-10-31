@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -145,6 +146,12 @@ def _default_config() -> Dict:
 
 _CACHE: Dict[str, Optional[Any]] = {"config": None, "movies": None}
 
+_YOUTUBE_SEARCH_CACHE: Dict[Tuple[str, int], Tuple[float, List[Dict[str, Any]]]] = {}
+_YOUTUBE_SEARCH_CACHE_TTL_SECONDS = 300
+_YOUTUBE_SEARCH_CACHE_MAX_ENTRIES = 32
+
+_YOUTUBE_SEARCH_PROCESS_TIMEOUT = 18
+
 jobs_repo = JobRepository(JOBS_PATH, max_items=50)
 
 
@@ -221,6 +228,55 @@ def _normalise_youtube_result(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]
         "description": str(entry.get("description") or "").strip(),
         "live": is_live,
     }
+
+
+def _normalise_search_query(value: str) -> str:
+    """Return a normalised form of a search query for caching."""
+
+    cleaned = " ".join(str(value or "").split())
+    return cleaned.strip().lower()
+
+
+def _get_cached_youtube_results(query: str, limit: int) -> Optional[List[Dict[str, Any]]]:
+    """Return cached search results for the given query and limit."""
+
+    now = time.time()
+    key = (query, limit)
+    entry = _YOUTUBE_SEARCH_CACHE.get(key)
+    if entry:
+        timestamp, results = entry
+        if now - timestamp <= _YOUTUBE_SEARCH_CACHE_TTL_SECONDS:
+            return [dict(item) for item in results]
+        _YOUTUBE_SEARCH_CACHE.pop(key, None)
+
+    # Fall back to a cache entry that contains more results than required.
+    for (cached_query, cached_limit), (timestamp, results) in list(_YOUTUBE_SEARCH_CACHE.items()):
+        if cached_query != query or cached_limit < limit:
+            continue
+        if now - timestamp > _YOUTUBE_SEARCH_CACHE_TTL_SECONDS:
+            _YOUTUBE_SEARCH_CACHE.pop((cached_query, cached_limit), None)
+            continue
+        return [dict(item) for item in results[:limit]]
+
+    return None
+
+
+def _store_cached_youtube_results(query: str, limit: int, results: List[Dict[str, Any]]) -> None:
+    """Persist search results in the in-memory cache."""
+
+    # Store a shallow copy so the cached data is not mutated later.
+    _YOUTUBE_SEARCH_CACHE[(query, limit)] = (time.time(), [dict(item) for item in results])
+
+    if len(_YOUTUBE_SEARCH_CACHE) <= _YOUTUBE_SEARCH_CACHE_MAX_ENTRIES:
+        return
+
+    # Prune the oldest cache entries when exceeding the limit.
+    sorted_entries = sorted(
+        _YOUTUBE_SEARCH_CACHE.items(),
+        key=lambda item: item[1][0],
+    )
+    for key, _ in sorted_entries[:-_YOUTUBE_SEARCH_CACHE_MAX_ENTRIES]:
+        _YOUTUBE_SEARCH_CACHE.pop(key, None)
 
 
 _NOISY_WARNING_SNIPPETS = (
@@ -867,10 +923,18 @@ def youtube_search():
     try:
         limit = int(limit_raw)
     except (TypeError, ValueError):
-        limit = 8
+        limit = 6
     if limit <= 0:
         limit = 1
     limit = min(limit, 20)
+
+    normalized_query = _normalise_search_query(query)
+    if not normalized_query:
+        return jsonify({"error": "Query parameter 'query' is required.", "results": []}), 400
+
+    cached_results = _get_cached_youtube_results(normalized_query, limit)
+    if cached_results is not None:
+        return jsonify({"results": cached_results, "cached": True})
 
     command = [
         "yt-dlp",
@@ -878,24 +942,34 @@ def youtube_search():
         "--no-warnings",
         "--no-playlist",
         "--skip-download",
+        "--socket-timeout",
+        "10",
         f"ytsearch{limit}:{query}",
     ]
 
     try:
-        process = subprocess.run(
+        process = subprocess.Popen(
             command,
-            check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=25,
         )
+    except OSError as exc:
+        return jsonify({"error": f"Failed to execute yt-dlp: {exc}", "results": []}), 500
+
+    try:
+        raw_stdout, raw_stderr = process.communicate(timeout=_YOUTUBE_SEARCH_PROCESS_TIMEOUT)
     except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.communicate()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
         return jsonify({"error": "YouTube search timed out.", "results": []}), 504
     except OSError as exc:
         return jsonify({"error": f"Failed to execute yt-dlp: {exc}", "results": []}), 500
 
-    raw_stdout = process.stdout or ""
+    raw_stdout = raw_stdout or ""
     parsed_output: Any
     if raw_stdout.strip():
         try:
@@ -932,8 +1006,11 @@ def youtube_search():
         if len(results) >= limit:
             break
 
+    if results:
+        _store_cached_youtube_results(normalized_query, limit, results)
+
     if process.returncode not in (0,) and not results:
-        error_message = (process.stderr or "").strip().splitlines() or ["yt-dlp reported an error."]
+        error_message = (raw_stderr or "").strip().splitlines() or ["yt-dlp reported an error."]
         return jsonify({"error": error_message[0], "results": []}), 502
 
     return jsonify({"results": results})

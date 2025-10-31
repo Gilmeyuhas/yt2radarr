@@ -111,7 +111,8 @@ document.addEventListener('DOMContentLoaded', () => {
       loading: false,
       results: [],
       selectedIndex: -1,
-      lastSelectedUrl: ''
+      lastSelectedUrl: '',
+      controller: null
     },
     addMovie: {
       modalOpen: false,
@@ -151,6 +152,7 @@ document.addEventListener('DOMContentLoaded', () => {
     : 'Search';
   const YT_SEARCH_MIN_QUERY_LENGTH = 3;
   const YT_SEARCH_DEBOUNCE = 400;
+  const YT_SEARCH_RESULT_LIMIT = 6;
 
   function clearCopyFeedbackTimer() {
     if (state.copyFeedbackTimeout) {
@@ -178,6 +180,18 @@ document.addEventListener('DOMContentLoaded', () => {
       clearTimeout(state.youtubeSearch.timeout);
       state.youtubeSearch.timeout = null;
     }
+  }
+
+  function abortOngoingYouTubeSearch() {
+    const { controller } = state.youtubeSearch;
+    if (controller && typeof controller.abort === 'function') {
+      try {
+        controller.abort();
+      } catch (err) {
+        // Ignore abort errors
+      }
+    }
+    state.youtubeSearch.controller = null;
   }
 
   function setYouTubeSearchLoading(loading) {
@@ -387,6 +401,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const query = elements.ytSearchInput.value ? elements.ytSearchInput.value.trim() : '';
     clearYouTubeSearchTimer();
     if (!query) {
+      abortOngoingYouTubeSearch();
       state.youtubeSearch.results = [];
       resetYouTubeSearchSelection();
       renderYouTubeSearchResults();
@@ -395,6 +410,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     if (query.length < YT_SEARCH_MIN_QUERY_LENGTH) {
+      abortOngoingYouTubeSearch();
       state.youtubeSearch.results = [];
       resetYouTubeSearchSelection();
       renderYouTubeSearchResults();
@@ -417,12 +433,22 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!trimmedQuery) {
       return;
     }
+    abortOngoingYouTubeSearch();
     const token = ++state.youtubeSearch.token;
     setYouTubeSearchLoading(true);
     resetYouTubeSearchSelection();
     setYouTubeSearchFeedback('Searching YouTube…', 'info');
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    state.youtubeSearch.controller = controller;
     try {
-      const response = await fetch(`/youtube/search?query=${encodeURIComponent(trimmedQuery)}`);
+      const params = new URLSearchParams();
+      params.set('query', trimmedQuery);
+      if (YT_SEARCH_RESULT_LIMIT) {
+        params.set('limit', String(YT_SEARCH_RESULT_LIMIT));
+      }
+      const response = await fetch(`/youtube/search?${params.toString()}`, {
+        signal: controller ? controller.signal : undefined
+      });
       const data = await response.json().catch(() => ({}));
       if (token !== state.youtubeSearch.token) {
         return;
@@ -441,12 +467,16 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!results.length) {
         setYouTubeSearchFeedback('No videos found for that search.', 'warning');
       } else {
+        const prefix = data && data.cached ? 'Showing cached' : 'Showing';
         setYouTubeSearchFeedback(
-          `Showing ${results.length} result${results.length === 1 ? '' : 's'}. Select one to fill the URL field.`,
+          `${prefix} ${results.length} result${results.length === 1 ? '' : 's'}. Select one to fill the URL field.`,
           'info'
         );
       }
     } catch (err) {
+      if (controller && err && err.name === 'AbortError') {
+        return;
+      }
       if (token !== state.youtubeSearch.token) {
         return;
       }
@@ -458,7 +488,10 @@ document.addEventListener('DOMContentLoaded', () => {
       );
     } finally {
       if (token === state.youtubeSearch.token) {
+        state.youtubeSearch.controller = null;
         setYouTubeSearchLoading(false);
+      } else if (state.youtubeSearch.controller === controller) {
+        state.youtubeSearch.controller = null;
       }
     }
   }
