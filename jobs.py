@@ -266,7 +266,11 @@ class JobRepository:  # pylint: disable=too-many-instance-attributes
         )
 
     def mark_cancelled(
-        self, job_id: str, message: str = "Job cancelled by user.", *, progress: Optional[float] = None
+        self,
+        job_id: str,
+        message: str = "Job cancelled by user.",
+        *,
+        progress: Optional[float] = None,
     ) -> Optional[Dict]:
         """Mark a job as cancelled without treating it as a failure."""
 
