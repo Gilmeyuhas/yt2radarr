@@ -52,7 +52,9 @@ document.addEventListener('DOMContentLoaded', () => {
     pollers: new Map(),
     debugMode: initialDebugMode,
     lastLogs: [],
-    copyFeedbackTimeout: null
+    copyFeedbackTimeout: null,
+    selectedJobId: null,
+    activeConsoleJobId: null
   };
 
   const IMPORTANT_LINE_SNIPPETS = [
@@ -312,10 +314,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function buildDownloadItem(entry) {
+  function buildDownloadItem(entry, options = {}) {
+    const { isSelected = false } = options;
     const wrapper = document.createElement('div');
     wrapper.className = 'download-item';
     wrapper.dataset.status = entry.status;
+    if (entry.id) {
+      wrapper.dataset.jobId = entry.id;
+    }
+    wrapper.classList.add('is-interactive');
+    wrapper.setAttribute('tabindex', '0');
+    wrapper.setAttribute('role', 'button');
+    const labelText = entry.label ? `View logs for ${entry.label}` : 'View logs for job';
+    wrapper.setAttribute('aria-label', labelText);
+    if (isSelected) {
+      wrapper.classList.add('is-selected');
+      wrapper.setAttribute('aria-current', 'true');
+    }
 
     const header = document.createElement('div');
     header.className = 'item-header';
@@ -383,6 +398,15 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     elements.downloadsList.innerHTML = '';
+    if (
+      state.selectedJobId &&
+      !state.downloads.some(item => item && item.id === state.selectedJobId)
+    ) {
+      if (state.activeConsoleJobId === state.selectedJobId) {
+        state.activeConsoleJobId = null;
+      }
+      state.selectedJobId = null;
+    }
     if (!state.downloads.length) {
       elements.downloadsList.classList.add('empty');
       const empty = document.createElement('div');
@@ -394,7 +418,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     elements.downloadsList.classList.remove('empty');
     state.downloads.forEach(entry => {
-      elements.downloadsList.appendChild(buildDownloadItem(entry));
+      const isSelected = state.selectedJobId === entry.id;
+      elements.downloadsList.appendChild(buildDownloadItem(entry, { isSelected }));
     });
   }
 
@@ -413,6 +438,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!jobId) {
       return;
     }
+    const shouldNotifyNotFound = Boolean(options.notifyNotFound);
     try {
       const response = await fetch(`/jobs/${encodeURIComponent(jobId)}`);
       if (!response.ok) {
@@ -424,6 +450,19 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const job = data && data.job ? data.job : null;
       if (!job) {
+        if (
+          (options.showConsole || state.activeConsoleJobId === jobId) &&
+          shouldNotifyNotFound
+        ) {
+          renderLogLines(['ERROR: Job not found or has expired.']);
+        }
+        if (state.activeConsoleJobId === jobId) {
+          state.activeConsoleJobId = null;
+        }
+        if (state.selectedJobId === jobId) {
+          state.selectedJobId = null;
+          renderDownloads();
+        }
         stopJobPolling(jobId);
         return;
       }
@@ -431,7 +470,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (entry) {
         upsertDownload(entry);
       }
-      if (options.showConsole && Array.isArray(job.logs)) {
+      const showConsole = Boolean(options.showConsole) || state.activeConsoleJobId === jobId;
+      if (showConsole && Array.isArray(job.logs)) {
         renderLogLines(job.logs);
       }
       if (job.status === 'complete' || job.status === 'failed') {
@@ -603,6 +643,63 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (elements.copyButton) {
     elements.copyButton.addEventListener('click', copyFullLogToClipboard);
+  }
+
+  function findDownloadItem(target) {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+    return target.closest('.download-item');
+  }
+
+  function activateDownloadItem(jobId) {
+    if (!jobId) {
+      return;
+    }
+    const previousActive = state.activeConsoleJobId;
+    state.selectedJobId = jobId;
+    state.activeConsoleJobId = jobId;
+    renderDownloads();
+    const entry = state.downloads.find(item => item && item.id === jobId);
+    const label = entry && entry.label ? entry.label : 'job';
+    if (previousActive !== jobId) {
+      resetConsole(`Loading logs for ${label}...`);
+    }
+    pollJob(jobId, { showConsole: true, notifyNotFound: true });
+  }
+
+  if (elements.downloadsList) {
+    elements.downloadsList.addEventListener('click', event => {
+      const item = findDownloadItem(event.target);
+      if (!item || !item.classList.contains('is-interactive')) {
+        return;
+      }
+      const jobId = item.dataset ? item.dataset.jobId : null;
+      if (!jobId) {
+        return;
+      }
+      event.preventDefault();
+      activateDownloadItem(jobId);
+    });
+
+    elements.downloadsList.addEventListener('keydown', event => {
+      if (event.defaultPrevented) {
+        return;
+      }
+      if (event.key !== 'Enter' && event.key !== ' ') {
+        return;
+      }
+      const item = findDownloadItem(event.target);
+      if (!item || !item.classList.contains('is-interactive')) {
+        return;
+      }
+      const jobId = item.dataset ? item.dataset.jobId : null;
+      if (!jobId) {
+        return;
+      }
+      event.preventDefault();
+      activateDownloadItem(jobId);
+    });
   }
 
   elements.form.addEventListener('submit', async event => {
