@@ -68,6 +68,70 @@ def _format_filesize(value: Optional[float]) -> str:
         size /= 1024
         unit_index += 1
     return f"{size:.1f} {units[unit_index]}"
+
+
+def _format_duration(value: Optional[Any]) -> str:
+    """Return a human-readable duration string for seconds."""
+
+    if value is None:
+        return ""
+    seconds: Optional[int]
+    if isinstance(value, (int, float)):
+        seconds = int(value)
+    else:
+        try:
+            seconds = int(float(value))
+        except (TypeError, ValueError):
+            seconds = None
+    if seconds is None or seconds < 0:
+        return ""
+    hours, remainder = divmod(seconds, 3600)
+    minutes, sec = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{sec:02d}"
+    return f"{minutes:d}:{sec:02d}"
+
+
+def _format_upload_date(value: Optional[str]) -> str:
+    """Return a YYYY-MM-DD string from a YouTube upload date."""
+
+    if not value:
+        return ""
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if len(digits) != 8:
+        return ""
+    year = digits[0:4]
+    month = digits[4:6]
+    day = digits[6:8]
+    return f"{year}-{month}-{day}"
+
+
+def _select_thumbnail(thumbnails: Any) -> str:
+    """Return the most appropriate thumbnail URL from yt-dlp data."""
+
+    if not isinstance(thumbnails, list):
+        return ""
+    best_url = ""
+    best_score = -1
+    for thumb in thumbnails:
+        if not isinstance(thumb, dict):
+            continue
+        url = str(thumb.get("url") or thumb.get("thumbnail") or "").strip()
+        if not url:
+            continue
+        width = thumb.get("width")
+        height = thumb.get("height")
+        score = 0
+        if isinstance(width, (int, float)) and isinstance(height, (int, float)):
+            score = int(width) * int(height)
+        elif isinstance(width, (int, float)):
+            score = int(width)
+        elif isinstance(height, (int, float)):
+            score = int(height)
+        if score >= best_score:
+            best_score = score
+            best_url = url
+    return best_url
 def _default_config() -> Dict:
     return {
         "radarr_url": (os.environ.get("RADARR_URL") or "").rstrip("/"),
@@ -107,6 +171,56 @@ def _mark_job_success(job_id: str) -> None:
 def _job_status(job_id: str, status: str, progress: Optional[float] = None) -> None:
     """Persist a status update for a job."""
     jobs_repo.status(job_id, status, progress=progress)
+
+
+def _normalise_youtube_result(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Transform a yt-dlp search entry into a response payload."""
+
+    if not isinstance(entry, dict):
+        return None
+
+    url = (
+        str(entry.get("original_url") or "").strip()
+        or str(entry.get("webpage_url") or "").strip()
+        or str(entry.get("url") or "").strip()
+    )
+    video_id = str(entry.get("id") or "").strip()
+    if not url and video_id:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+    if not url:
+        return None
+
+    duration = entry.get("duration")
+    try:
+        duration_seconds = int(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration_seconds = None
+
+    view_count = entry.get("view_count")
+    if isinstance(view_count, (int, float)):
+        view_count_value: Optional[int] = int(view_count)
+    else:
+        try:
+            view_count_value = int(view_count) if view_count is not None else None
+        except (TypeError, ValueError):
+            view_count_value = None
+
+    live_status = str(entry.get("live_status") or "").lower()
+    is_live = bool(entry.get("is_live")) or live_status in {"is_live", "was_live", "not_yet_live"}
+
+    return {
+        "id": video_id or url,
+        "title": str(entry.get("title") or "Untitled video").strip() or "Untitled video",
+        "url": url,
+        "duration": duration_seconds,
+        "duration_text": _format_duration(duration_seconds),
+        "channel": str(entry.get("uploader") or entry.get("channel") or "").strip(),
+        "upload_date": _format_upload_date(entry.get("upload_date")),
+        "view_count": view_count_value,
+        "thumbnail": _select_thumbnail(entry.get("thumbnails")),
+        "description": str(entry.get("description") or "").strip(),
+        "live": is_live,
+    }
 
 
 _NOISY_WARNING_SNIPPETS = (
@@ -739,6 +853,90 @@ def _format_quality_profile(entry: Dict[str, Any]) -> Dict[str, Any]:
         "id": entry.get("id"),
         "name": entry.get("name") or f"Profile {entry.get('id')}",
     }
+
+
+@app.route("/youtube/search", methods=["GET"])
+def youtube_search():
+    """Search YouTube for videos using yt-dlp and return structured results."""
+
+    query = str(request.args.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "Query parameter 'query' is required.", "results": []}), 400
+
+    limit_raw = str(request.args.get("limit") or "").strip()
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 8
+    if limit <= 0:
+        limit = 1
+    limit = min(limit, 20)
+
+    command = [
+        "yt-dlp",
+        "-J",
+        "--no-warnings",
+        "--no-playlist",
+        "--skip-download",
+        f"ytsearch{limit}:{query}",
+    ]
+
+    try:
+        process = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=25,
+        )
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "YouTube search timed out.", "results": []}), 504
+    except OSError as exc:
+        return jsonify({"error": f"Failed to execute yt-dlp: {exc}", "results": []}), 500
+
+    raw_stdout = process.stdout or ""
+    parsed_output: Any
+    if raw_stdout.strip():
+        try:
+            parsed_output = json.loads(raw_stdout)
+        except json.JSONDecodeError:
+            parsed_output = []
+            for line in raw_stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed_output.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    else:
+        parsed_output = []
+
+    entries: List[Any] = []
+    if isinstance(parsed_output, dict):
+        potential_entries = parsed_output.get("entries")
+        if isinstance(potential_entries, list):
+            entries = potential_entries
+        else:
+            entries = [parsed_output]
+    elif isinstance(parsed_output, list):
+        entries = parsed_output
+
+    results: List[Dict[str, Any]] = []
+    for entry in entries:
+        normalised = _normalise_youtube_result(entry)
+        if not normalised:
+            continue
+        results.append(normalised)
+        if len(results) >= limit:
+            break
+
+    if process.returncode not in (0,) and not results:
+        error_message = (process.stderr or "").strip().splitlines() or ["yt-dlp reported an error."]
+        return jsonify({"error": error_message[0], "results": []}), 502
+
+    return jsonify({"results": results})
 
 
 @app.route("/radarr/options", methods=["GET"])
