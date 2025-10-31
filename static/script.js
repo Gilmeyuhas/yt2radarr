@@ -9,6 +9,7 @@ document.addEventListener('DOMContentLoaded', () => {
     yearInput: document.getElementById('year'),
     tmdbInput: document.getElementById('tmdb'),
     extraCheckbox: document.getElementById('extra'),
+    playlistModeSelect: document.getElementById('playlistMode'),
     extraTypeSelect: document.getElementById('extraType'),
     extraFields: document.getElementById('extraFields'),
     extraNameInput: document.getElementById('extra_name'),
@@ -616,7 +617,8 @@ document.addEventListener('DOMContentLoaded', () => {
       tmdb: elements.tmdbInput ? elements.tmdbInput.value.trim() : '',
       extra: elements.extraCheckbox ? elements.extraCheckbox.checked : false,
       extraType: elements.extraTypeSelect ? elements.extraTypeSelect.value : 'trailer',
-      extra_name: elements.extraNameInput ? elements.extraNameInput.value.trim() : ''
+      extra_name: elements.extraNameInput ? elements.extraNameInput.value.trim() : '',
+      playlist_mode: elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single'
     };
 
     resetConsole('Submitting request...');

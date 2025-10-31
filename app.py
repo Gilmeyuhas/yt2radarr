@@ -42,8 +42,6 @@ YTDLP_FORMAT_SELECTOR = (
     "95/"
     "best"
 )
-
-
 def _format_filesize(value: Optional[float]) -> str:
     """Return a human-readable string for a byte size."""
 
@@ -61,7 +59,6 @@ def _format_filesize(value: Optional[float]) -> str:
         size /= 1024
         unit_index += 1
     return f"{size:.1f} {units[unit_index]}"
-
 def _default_config() -> Dict:
     return {
         "radarr_url": (os.environ.get("RADARR_URL") or "").rstrip("/"),
@@ -119,6 +116,7 @@ _ESSENTIAL_PHRASES = (
     "created movie folder",
     "fetching radarr details",
     "resolved youtube format",
+    "merging playlist videos",
 )
 
 
@@ -455,6 +453,33 @@ EXTRA_TYPE_LABELS = {
 }
 
 
+EXTRA_TYPE_ALIASES = {
+    "trailers": "trailer",
+    "behindthescene": "behindthescenes",
+    "behindthescenesclip": "behindthescenes",
+    "behindthescenesfeature": "behindthescenes",
+    "behindthescenesfeaturette": "behindthescenes",
+    "deletedscene": "deleted",
+    "deletedscenes": "deleted",
+    "featurettes": "featurette",
+    "interviews": "interview",
+    "scenes": "scene",
+    "shorts": "short",
+    "extras": "other",
+}
+
+
+def normalize_extra_type_key(raw_value: str) -> Optional[str]:
+    """Return a canonical extra type key for a user-provided value."""
+
+    token = re.sub(r"[^a-z]", "", str(raw_value or "").lower())
+    if not token:
+        return None
+    if token in EXTRA_TYPE_LABELS:
+        return token
+    return EXTRA_TYPE_ALIASES.get(token)
+
+
 def _describe_job(payload: Dict) -> Dict:
     """Build presentation metadata for a job payload."""
     movie_label = (payload.get("movieName") or payload.get("title") or "").strip()
@@ -463,6 +488,13 @@ def _describe_job(payload: Dict) -> Dict:
     extra = bool(payload.get("extra"))
     extra_type = (payload.get("extraType") or "trailer").strip().lower()
     extra_name = (payload.get("extra_name") or "").strip()
+    merge_playlist = bool(payload.get("merge_playlist"))
+    playlist_mode = (
+        payload.get("playlist_mode")
+        or ("merge" if merge_playlist else "single")
+    ).strip().lower()
+    if playlist_mode == "merge":
+        merge_playlist = True
     extra_label = extra_name or EXTRA_TYPE_LABELS.get(extra_type, extra_type.capitalize())
     if extra and extra_label:
         label = f"{movie_label} – {extra_label}"
@@ -473,7 +505,82 @@ def _describe_job(payload: Dict) -> Dict:
     metadata = []
     if extra:
         metadata.append("Stored as extra content")
+    if merge_playlist:
+        metadata.append("Playlist merged into single file")
     return {"label": label or "Radarr Download", "subtitle": subtitle, "metadata": metadata}
+
+
+ALLOWED_PLAYLIST_MODES = {"single", "merge"}
+
+
+def _validate_request_urls(data: Dict, error: Callable[[str], None]) -> str:
+    """Return the validated YouTube URL from the request payload."""
+
+    yt_url = (data.get("yturl") or "").strip()
+    if not yt_url:
+        error("YouTube URL is required.")
+    elif not re.search(r"(youtube\.com|youtu\.be)/", yt_url):
+        error("Please provide a valid YouTube URL.")
+    return yt_url
+
+
+def _validate_movie_selection(data: Dict, error: Callable[[str], None]) -> str:
+    """Ensure a movie has been chosen from the suggestions list."""
+
+    movie_id = (data.get("movieId") or "").strip()
+    if not movie_id:
+        error("No movie selected. Please choose a movie from the suggestions list.")
+    return movie_id
+
+
+def _resolve_playlist_mode(data: Dict, error: Callable[[str], None]) -> str:
+    """Return the requested playlist handling mode."""
+
+    playlist_mode = (data.get("playlist_mode") or "single").strip().lower()
+    if playlist_mode not in ALLOWED_PLAYLIST_MODES:
+        error("Invalid playlist handling option selected.")
+        playlist_mode = "single"
+    return playlist_mode
+
+
+def _resolve_extra_settings(
+    data: Dict, error: Callable[[str], None]
+) -> Tuple[bool, str, str]:
+    """Determine the extra storage options for the request."""
+
+    extra_requested = bool(data.get("extra"))
+    extra_name = (data.get("extra_name") or "").strip()
+
+    if extra_requested and not extra_name:
+        error("Extra name is required when storing in a subfolder.")
+
+    selected_extra_type = (data.get("extraType") or "trailer").strip().lower()
+
+    return extra_requested, extra_name, selected_extra_type
+
+
+def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
+    """Validate and sanitise the incoming create payload."""
+
+    playlist_mode = _resolve_playlist_mode(data, error)
+
+    extra_requested, extra_name, selected_extra_type = _resolve_extra_settings(
+        data, error
+    )
+
+    return {
+        "yturl": _validate_request_urls(data, error),
+        "movieId": _validate_movie_selection(data, error),
+        "movieName": (data.get("movieName") or "").strip(),
+        "title": (data.get("title") or "").strip(),
+        "year": (data.get("year") or "").strip(),
+        "tmdb": (data.get("tmdb") or "").strip(),
+        "extra": extra_requested,
+        "extraType": selected_extra_type,
+        "extra_name": extra_name,
+        "merge_playlist": playlist_mode == "merge",
+        "playlist_mode": playlist_mode,
+    }
 
 
 @app.route("/", methods=["GET"])
@@ -487,6 +594,8 @@ def index():
         configured=is_configured(config),
         debug_mode=config.get("debug_mode", False),
     )
+
+
 @app.route("/create", methods=["POST"])
 def create():
     """Create a new download job from the submitted request payload."""
@@ -502,35 +611,10 @@ def create():
         logs.append(f"ERROR: {message}")
         errors.append(message)
 
-    yt_url = (data.get("yturl") or "").strip()
-    if not yt_url:
-        error("YouTube URL is required.")
-    elif not re.search(r"(youtube\.com|youtu\.be)/", yt_url):
-        error("Please provide a valid YouTube URL.")
-
-    movie_id = (data.get("movieId") or "").strip()
-    if not movie_id:
-        error("No movie selected. Please choose a movie from the suggestions list.")
-
-    extra = bool(data.get("extra"))
-    extra_name = (data.get("extra_name") or "").strip()
-    if extra and not extra_name:
-        error("Extra name is required when storing in a subfolder.")
+    payload = _prepare_create_payload(data, error)
 
     if errors:
         return jsonify({"logs": logs}), 400
-
-    payload = {
-        "yturl": yt_url,
-        "movieId": movie_id,
-        "movieName": (data.get("movieName") or "").strip(),
-        "title": (data.get("title") or "").strip(),
-        "year": (data.get("year") or "").strip(),
-        "tmdb": (data.get("tmdb") or "").strip(),
-        "extra": extra,
-        "extraType": (data.get("extraType") or "trailer").strip().lower(),
-        "extra_name": extra_name,
-    }
 
     descriptors = _describe_job(payload)
     job_id = str(uuid.uuid4())
@@ -592,6 +676,17 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         tmdb = (payload.get("tmdb") or "").strip()
         title = (payload.get("title") or "").strip()
         year = (payload.get("year") or "").strip()
+        merge_playlist = bool(payload.get("merge_playlist"))
+        playlist_mode = (
+            payload.get("playlist_mode")
+            or ("merge" if merge_playlist else "single")
+        ).strip().lower()
+        if playlist_mode not in ALLOWED_PLAYLIST_MODES:
+            warn(f"Invalid playlist mode '{playlist_mode}', defaulting to single video.")
+            playlist_mode = "single"
+        merge_playlist = playlist_mode == "merge"
+        payload["playlist_mode"] = playlist_mode
+        payload["merge_playlist"] = merge_playlist
 
         resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
         if resolved is None or not str(resolved.get("id")):
@@ -675,6 +770,9 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         else:
             log("Treating video as main video file.")
 
+        if merge_playlist:
+            log("Playlist download requested; videos will be merged into a single file.")
+
         movie_stem = build_movie_stem(movie)
         log(f"Resolved Radarr movie stem to '{movie_stem}'.")
 
@@ -689,8 +787,46 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 log(f"Using extra label '{extra_label}'.")
 
         descriptive = extra_name
+        default_label = "Playlist" if merge_playlist else "Video"
         if descriptive:
             log(f"Using custom descriptive name '{descriptive}'.")
+        elif merge_playlist:
+            try:
+                log("Querying yt-dlp for playlist title.")
+                yt_cmd = [
+                    "yt-dlp",
+                    "--skip-download",
+                    "--print",
+                    "%(playlist_title)s",
+                ]
+                if cookie_path:
+                    yt_cmd += ["--cookies", cookie_path]
+                yt_cmd.append(yt_url)
+                proc = subprocess.run(
+                    yt_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                titles = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+                playlist_title = titles[0] if titles else ""
+                descriptive = playlist_title or default_label
+                if playlist_title:
+                    log(f"Using playlist title '{playlist_title}'.")
+                else:
+                    warn(
+                        f"Playlist title was empty. Using fallback name '{default_label}'."
+                    )
+            except (
+                subprocess.CalledProcessError,
+                FileNotFoundError,
+                OSError,
+            ) as exc:  # pragma: no cover - command failure
+                descriptive = default_label
+                warn(
+                    "Failed to retrieve playlist title from yt-dlp "
+                    f"({exc}). Using fallback name '{default_label}'."
+                )
         else:
             try:
                 log("Querying yt-dlp for video title.")
@@ -707,19 +843,20 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     text=True,
                     check=True,
                 )
-                descriptive = proc.stdout.strip() or "Video"
+                descriptive = proc.stdout.strip() or default_label
                 log(f"Using YouTube title '{descriptive}'.")
             except (
                 subprocess.CalledProcessError,
                 FileNotFoundError,
                 OSError,
             ) as exc:  # pragma: no cover - command failure
-                descriptive = "Video"
+                descriptive = default_label
                 warn(
-                    f"Failed to retrieve title from yt-dlp ({exc}). Using fallback name 'Video'."
+                    "Failed to retrieve title from yt-dlp "
+                    f"({exc}). Using fallback name '{default_label}'."
                 )
 
-        descriptive = sanitize_filename(descriptive) or "Video"
+        descriptive = sanitize_filename(descriptive) or default_label
 
         if extra:
             extra_suffix = sanitize_filename(extra_name) or extra_type
@@ -745,8 +882,21 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 suffix_index += 1
 
         template_base = filename_base.replace("%", "%%")
-        target_template = os.path.join(target_dir, f"{template_base}.%(ext)s")
-        expected_pattern = os.path.join(target_dir, f"{filename_base}.*")
+        playlist_temp_dir: Optional[str] = None
+        if merge_playlist:
+            playlist_temp_dir = os.path.join(target_dir, f".yt2radarr_playlist_{job_id}")
+            os.makedirs(playlist_temp_dir, exist_ok=True)
+            log(
+                "Playlist merge enabled. Downloads will be staged in "
+                f"'{os.path.basename(playlist_temp_dir)}'."
+            )
+            target_template = os.path.join(
+                playlist_temp_dir, "%(playlist_index)05d - %(title)s.%(ext)s"
+            )
+            expected_pattern = os.path.join(playlist_temp_dir, "*.*")
+        else:
+            target_template = os.path.join(target_dir, f"{template_base}.%(ext)s")
+            expected_pattern = os.path.join(target_dir, f"{filename_base}.*")
 
         if shutil.which("ffmpeg") is None:
             warn(
@@ -764,6 +914,10 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             "-f",
             format_selector,
             "--skip-download",
+        ]
+        if merge_playlist:
+            info_command.append("--yes-playlist")
+        info_command += [
             "--print-json",
             yt_url,
         ]
@@ -883,7 +1037,10 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         if cookie_path:
             command += ["--cookies", cookie_path]
         command += ["--newline"]
-        command += ["-f", format_selector, "-o", target_template, yt_url]
+        command += ["-f", format_selector]
+        if merge_playlist:
+            command.append("--yes-playlist")
+        command += ["-o", target_template, yt_url]
 
         log("Running yt-dlp with explicit output template.")
 
@@ -990,6 +1147,91 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             fail("Download completed but the output file could not be located.")
             return
 
+        if merge_playlist:
+            if not playlist_temp_dir:
+                fail("Internal error: playlist staging directory was not created.")
+                return
+            ffmpeg_path = shutil.which("ffmpeg")
+            if ffmpeg_path is None:
+                fail("ffmpeg is required to merge playlist videos but was not found.")
+                return
+            downloaded_candidates.sort()
+            segment_count = len(downloaded_candidates)
+            log(
+                f"Merging playlist videos with ffmpeg (segments: {segment_count})."
+            )
+
+            def _escape_concat_path(value: str) -> str:
+                return value.replace("\\", "\\\\").replace("'", "\\'")
+
+            concat_manifest = os.path.join(playlist_temp_dir, "concat.txt")
+            try:
+                with open(concat_manifest, "w", encoding="utf-8") as handle:
+                    for candidate in downloaded_candidates:
+                        handle.write(
+                            f"file '{_escape_concat_path(os.path.abspath(candidate))}'\n"
+                        )
+            except OSError as exc:
+                fail(f"Failed to prepare playlist merge manifest: {exc}")
+                return
+
+            first_ext = os.path.splitext(downloaded_candidates[0])[1] or ".mp4"
+            merged_output_path = os.path.join(playlist_temp_dir, f"merged{first_ext}")
+
+            merge_command = [
+                ffmpeg_path,
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                concat_manifest,
+                "-c",
+                "copy",
+                merged_output_path,
+            ]
+
+            try:
+                merge_result = subprocess.run(
+                    merge_command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except (OSError, ValueError) as exc:
+                fail(f"Failed to invoke ffmpeg for playlist merge: {exc}")
+                return
+
+            if merge_result.stdout:
+                for line in merge_result.stdout.strip().splitlines():
+                    debug(f"ffmpeg: {line}")
+            if merge_result.stderr:
+                for line in merge_result.stderr.strip().splitlines():
+                    debug(f"ffmpeg: {line}")
+
+            if merge_result.returncode != 0 or not os.path.exists(merged_output_path):
+                fail("Failed to merge playlist videos into a single file.")
+                return
+
+            log("Merging playlist videos completed successfully.")
+
+            try:
+                os.remove(concat_manifest)
+            except OSError:
+                pass
+
+            for candidate in downloaded_candidates:
+                if os.path.abspath(candidate) == os.path.abspath(merged_output_path):
+                    continue
+                try:
+                    os.remove(candidate)
+                except OSError:
+                    continue
+
+            downloaded_candidates = [merged_output_path]
+
+
         final_candidates = [
             path for path in downloaded_candidates if not _is_intermediate_file(path)
         ]
@@ -1086,6 +1328,12 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 os.remove(leftover)
             except OSError:
                 continue
+
+        if merge_playlist and playlist_temp_dir:
+            try:
+                shutil.rmtree(playlist_temp_dir)
+            except OSError:
+                pass
 
         _job_status(job_id, "processing", progress=100)
         log(f"Success! Video saved as '{target_path}'.")

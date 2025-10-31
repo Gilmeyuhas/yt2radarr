@@ -11,6 +11,7 @@ A web UI that turns any publicly accessible YouTube video into a Radarr-ready mo
 * Fetches your entire Radarr library so you can attach a download to the exact title (including extras such as trailers or behind-the-scenes clips).
 * Uses `yt-dlp` with a tuned format selector to prefer high bitrate HLS/H.264 sources before falling back to other codecs.
 * Renames downloads to Plex/Radarr naming conventions and resolves extras into sub-folders when requested.
+* Flexible playlist workflows: merge an entire playlist into a single movie file while preserving Radarr naming conventions.
 * Applies optional Radarr path overrides so the importer works in Docker, Kubernetes, or directly on your workstation.
 * Records download jobs and progress so you can review historical runs.
 
@@ -96,6 +97,12 @@ Everything about the Compose file is customizable - swap ports, change mount poi
 2. Open the **Settings → YouTube Cookies** section and paste the contents of `cookies.txt`. yt2radarr stores it under your configuration directory and immediately locks the file down to owner read/write (0600 on Unix-like systems) so it isn’t exposed to other users on the host.
 3. Prefer to manage secrets outside the app? Mount a file and point `YT_COOKIE_FILE` at it—the environment variable wins over anything saved via the UI, which keeps existing setups working without changes. A read-only bind mount or secret store integration works well here. I myself store the cookies in a Kubernetes secret.
 4. Need to rotate cookies? Paste the fresh file or tick “Remove saved cookies” to delete the stored copy. The UI never redisplays saved cookies; it only acknowledges whether a file exists.
+
+### Playlist downloads
+Use the **Playlist Handling** menu on the main form to decide how yt2radarr should treat a YouTube playlist:
+
+* **Download only this video** – the default single-video workflow.
+* **Download entire playlist and merge into a single file** – stages every clip with `yt-dlp` and concatenates them via `ffmpeg`. This produces a single Radarr-ready movie file and requires `ffmpeg` to be available on the PATH.
 
 ## 🛠 Tips for portability
 
