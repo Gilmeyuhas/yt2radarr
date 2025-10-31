@@ -45,7 +45,8 @@ document.addEventListener('DOMContentLoaded', () => {
     queued: 'Queued',
     processing: 'Processing',
     complete: 'Completed',
-    failed: 'Failed'
+    failed: 'Failed',
+    cancelled: 'Cancelled'
   };
 
   const EXTRA_TYPE_LABELS = {
@@ -58,6 +59,8 @@ document.addEventListener('DOMContentLoaded', () => {
     short: 'Short',
     other: 'Other'
   };
+
+  const CANCELLABLE_STATUSES = new Set(['queued', 'processing']);
 
   const MAX_DOWNLOAD_ENTRIES = 8;
   const POLL_INTERVAL = 1000;
@@ -102,6 +105,7 @@ document.addEventListener('DOMContentLoaded', () => {
     copyFeedbackTimeout: null,
     selectedJobId: null,
     activeConsoleJobId: null,
+    pendingCancellations: new Set(),
     addMovie: {
       modalOpen: false,
       searchTimeout: null,
@@ -1041,7 +1045,7 @@ document.addEventListener('DOMContentLoaded', () => {
     progressBar.appendChild(progressFill);
     wrapper.appendChild(progressBar);
 
-    if (entry.message && entry.status === 'failed') {
+    if (entry.message && (entry.status === 'failed' || entry.status === 'cancelled')) {
       const message = document.createElement('div');
       message.className = 'download-error';
       message.textContent = entry.message;
@@ -1052,15 +1056,34 @@ document.addEventListener('DOMContentLoaded', () => {
     footer.className = 'item-footer';
 
     const footerLeft = document.createElement('span');
+    footerLeft.className = 'item-footer-left';
     const metadataText = (entry.metadata || []).filter(Boolean).join(' • ');
     footerLeft.textContent = metadataText || ' ';
     footer.appendChild(footerLeft);
 
-    const footerRight = document.createElement('span');
-    const timestamp = entry.status === 'complete' || entry.status === 'failed'
+    const footerRight = document.createElement('div');
+    footerRight.className = 'item-footer-right';
+
+    if (entry.id && CANCELLABLE_STATUSES.has(entry.status)) {
+      const cancelButton = document.createElement('button');
+      cancelButton.type = 'button';
+      cancelButton.className = 'download-cancel-button';
+      cancelButton.dataset.jobId = entry.id;
+      const isCancelling = state.pendingCancellations.has(entry.id);
+      cancelButton.textContent = isCancelling ? 'Cancelling…' : 'Cancel';
+      cancelButton.disabled = isCancelling;
+      const cancelLabel = entry.label ? `Cancel ${entry.label}` : 'Cancel download';
+      cancelButton.setAttribute('aria-label', cancelLabel);
+      footerRight.appendChild(cancelButton);
+    }
+
+    const timestampElem = document.createElement('span');
+    timestampElem.className = 'item-timestamp';
+    const timestamp = entry.status === 'complete' || entry.status === 'failed' || entry.status === 'cancelled'
       ? formatTime(entry.updatedAt || entry.completedAt)
       : formatTime(entry.startedAt);
-    footerRight.textContent = timestamp;
+    timestampElem.textContent = timestamp;
+    footerRight.appendChild(timestampElem);
     footer.appendChild(footerRight);
 
     wrapper.appendChild(footer);
@@ -1138,6 +1161,7 @@ document.addEventListener('DOMContentLoaded', () => {
           renderDownloads();
         }
         stopJobPolling(jobId);
+        state.pendingCancellations.delete(jobId);
         return;
       }
       const entry = normaliseJob(job);
@@ -1148,12 +1172,14 @@ document.addEventListener('DOMContentLoaded', () => {
       if (showConsole && Array.isArray(job.logs)) {
         renderLogLines(job.logs);
       }
-      if (job.status === 'complete' || job.status === 'failed') {
+      if (job.status === 'complete' || job.status === 'failed' || job.status === 'cancelled') {
+        state.pendingCancellations.delete(jobId);
         stopJobPolling(jobId);
       }
     } catch (err) {
       appendConsoleLine(`ERROR: Failed to poll job ${jobId}: ${err && err.message ? err.message : err}`, 'error');
       stopJobPolling(jobId);
+      state.pendingCancellations.delete(jobId);
     }
   }
 
@@ -1166,11 +1192,56 @@ document.addEventListener('DOMContentLoaded', () => {
     state.pollers.set(jobId, timer);
   }
 
+  async function cancelJob(jobId) {
+    if (!jobId || state.pendingCancellations.has(jobId)) {
+      return;
+    }
+    state.pendingCancellations.add(jobId);
+    renderDownloads();
+    try {
+      const response = await fetch(`/jobs/${encodeURIComponent(jobId)}/cancel`, {
+        method: 'POST'
+      });
+      let data = null;
+      try {
+        data = await response.json();
+      } catch (err) {
+        data = null;
+      }
+      if (!response.ok) {
+        const message = data && data.message
+          ? data.message
+          : data && data.error
+            ? data.error
+            : `HTTP ${response.status}`;
+        appendConsoleLine(`ERROR: Failed to cancel job ${jobId}: ${message}`, 'error');
+        state.pendingCancellations.delete(jobId);
+        renderDownloads();
+        return;
+      }
+      if (data && data.message) {
+        appendConsoleLine(data.message);
+      }
+      const job = data && data.job ? normaliseJob(data.job) : null;
+      if (job) {
+        upsertDownload(job);
+      } else {
+        renderDownloads();
+      }
+      startJobPolling(jobId);
+    } catch (err) {
+      appendConsoleLine(`ERROR: Failed to cancel job ${jobId}: ${err && err.message ? err.message : err}`, 'error');
+      state.pendingCancellations.delete(jobId);
+      renderDownloads();
+    }
+  }
+
   function upsertDownload(update) {
     if (!update || !update.id) {
       return;
     }
     const index = state.downloads.findIndex(item => item.id === update.id);
+    let updatedEntry = null;
     if (index >= 0) {
       const existing = state.downloads[index];
       state.downloads[index] = {
@@ -1183,6 +1254,7 @@ document.addEventListener('DOMContentLoaded', () => {
         startedAt: update.startedAt || existing.startedAt,
         updatedAt: update.updatedAt || new Date()
       };
+      updatedEntry = state.downloads[index];
     } else {
       const now = new Date();
       state.downloads.push({
@@ -1194,6 +1266,11 @@ document.addEventListener('DOMContentLoaded', () => {
         startedAt: update.startedAt || now,
         updatedAt: update.updatedAt || now
       });
+      updatedEntry = state.downloads[state.downloads.length - 1];
+    }
+
+    if (updatedEntry && updatedEntry.id && !CANCELLABLE_STATUSES.has(updatedEntry.status)) {
+      state.pendingCancellations.delete(updatedEntry.id);
     }
 
     state.downloads.sort((a, b) => {
@@ -1204,7 +1281,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (state.downloads.length > MAX_DOWNLOAD_ENTRIES) {
       const removed = state.downloads.splice(MAX_DOWNLOAD_ENTRIES);
-      removed.forEach(entry => stopJobPolling(entry.id));
+      removed.forEach(entry => {
+        stopJobPolling(entry.id);
+        if (entry && entry.id) {
+          state.pendingCancellations.delete(entry.id);
+        }
+      });
     }
 
     renderDownloads();
@@ -1282,8 +1364,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (entry) {
           upsertDownload(entry);
         }
-        if (job.status === 'queued' || job.status === 'processing') {
-          startJobPolling(job.id);
+        if (entry && CANCELLABLE_STATUSES.has(entry.status)) {
+          startJobPolling(entry.id);
         }
       });
     } catch (err) {
@@ -1394,6 +1476,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (elements.downloadsList) {
     elements.downloadsList.addEventListener('click', event => {
+      const cancelButton = event.target instanceof Element ? event.target.closest('.download-cancel-button') : null;
+      if (cancelButton) {
+        const jobId = cancelButton.dataset ? cancelButton.dataset.jobId : null;
+        if (jobId) {
+          event.preventDefault();
+          event.stopPropagation();
+          cancelJob(jobId);
+        }
+        return;
+      }
       const item = findDownloadItem(event.target);
       if (!item || !item.classList.contains('is-interactive')) {
         return;
@@ -1411,6 +1503,9 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       if (event.key !== 'Enter' && event.key !== ' ') {
+        return;
+      }
+      if (event.target instanceof Element && event.target.closest('.download-cancel-button')) {
         return;
       }
       const item = findDownloadItem(event.target);
