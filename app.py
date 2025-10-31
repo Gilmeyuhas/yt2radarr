@@ -44,6 +44,56 @@ YTDLP_FORMAT_SELECTOR = (
 )
 
 
+def _extract_first_json_block(text: str) -> Optional[str]:
+    """Return the first JSON object or array found in the provided text."""
+
+    if not text:
+        return None
+
+    start_index: Optional[int] = None
+    stack: List[str] = []
+    in_string = False
+    escape_next = False
+
+    opening_to_closing = {"{": "}", "[": "]"}
+    closing_characters = set(opening_to_closing.values())
+
+    for index, char in enumerate(text):
+        if start_index is None:
+            if char in opening_to_closing:
+                start_index = index
+                stack.append(opening_to_closing[char])
+            continue
+
+        if escape_next:
+            escape_next = False
+            continue
+
+        if char == "\\":
+            escape_next = in_string
+            continue
+
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char in opening_to_closing:
+            stack.append(opening_to_closing[char])
+            continue
+
+        if char in closing_characters:
+            if not stack or char != stack[-1]:
+                break
+            stack.pop()
+            if not stack and start_index is not None:
+                return text[start_index : index + 1]
+
+    return None
+
+
 def _format_filesize(value: Optional[float]) -> str:
     """Return a human-readable string for a byte size."""
 
@@ -654,6 +704,8 @@ def _fetch_playlist_preview(
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except FileNotFoundError as exc:  # pragma: no cover - runtime dependency missing
@@ -666,10 +718,17 @@ def _fetch_playlist_preview(
         raise RuntimeError(f"yt-dlp reported an error: {stderr}")
 
     payload: Dict[str, Any]
+    stdout_text = result.stdout or ""
     try:
-        payload = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Failed to parse yt-dlp response.") from exc
+        payload = json.loads(stdout_text or "{}")
+    except json.JSONDecodeError:
+        json_block = _extract_first_json_block(stdout_text)
+        if not json_block:
+            raise RuntimeError("Failed to parse yt-dlp response.")
+        try:
+            payload = json.loads(json_block)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Failed to parse yt-dlp response.") from exc
 
     entries: List[Dict[str, Any]] = []
     playlist_title = ""
@@ -891,6 +950,8 @@ def playlist_preview():
         return jsonify({"error": str(exc)}), 500
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 502
+    except Exception as exc:  # pragma: no cover - unexpected failure
+        return jsonify({"error": f"Unexpected playlist probe error: {exc}"}), 500
 
     preview["limit"] = limit
     preview["debug_mode"] = config.get("debug_mode", False)
