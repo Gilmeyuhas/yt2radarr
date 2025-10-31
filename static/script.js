@@ -9,7 +9,9 @@ document.addEventListener('DOMContentLoaded', () => {
     yearInput: document.getElementById('year'),
     tmdbInput: document.getElementById('tmdb'),
     extraCheckbox: document.getElementById('extra'),
-    mergePlaylistCheckbox: document.getElementById('mergePlaylist'),
+    playlistModeSelect: document.getElementById('playlistMode'),
+    playlistExtrasFields: document.getElementById('playlistExtrasFields'),
+    playlistExtraTypesInput: document.getElementById('playlistExtraTypes'),
     extraTypeSelect: document.getElementById('extraType'),
     extraFields: document.getElementById('extraFields'),
     extraNameInput: document.getElementById('extra_name'),
@@ -62,7 +64,8 @@ document.addEventListener('DOMContentLoaded', () => {
     'storing video in subfolder',
     'created movie folder',
     'fetching radarr details',
-    'resolved youtube format'
+    'resolved youtube format',
+    'saving playlist extra'
   ];
 
   const NOISY_WARNING_SNIPPETS = [
@@ -552,19 +555,53 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function updatePlaylistControls() {
+    const extraEnabled = elements.extraCheckbox ? elements.extraCheckbox.checked : false;
+    if (elements.playlistModeSelect) {
+      const extrasOption = elements.playlistModeSelect.querySelector('option[value="extras"]');
+      if (extrasOption) {
+        extrasOption.disabled = !extraEnabled;
+      }
+      if (!extraEnabled && elements.playlistModeSelect.value === 'extras') {
+        elements.playlistModeSelect.value = 'single';
+      }
+    }
+
+    const requiresExtraTypes =
+      extraEnabled && elements.playlistModeSelect && elements.playlistModeSelect.value === 'extras';
+
+    if (elements.playlistExtrasFields) {
+      elements.playlistExtrasFields.style.display = requiresExtraTypes ? 'block' : 'none';
+    }
+
+    if (elements.playlistExtraTypesInput) {
+      elements.playlistExtraTypesInput.required = requiresExtraTypes;
+      if (!requiresExtraTypes) {
+        elements.playlistExtraTypesInput.value = elements.playlistExtraTypesInput.value.trim();
+      }
+    }
+  }
+
   function updateExtraVisibility() {
     if (!elements.extraFields || !elements.extraCheckbox || !elements.extraNameInput || !elements.extraTypeSelect) {
       return;
     }
+    const playlistMode = elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single';
     if (elements.extraCheckbox.checked) {
       elements.extraFields.style.display = 'block';
-      elements.extraNameInput.required = true;
+      const requiresExtraName = playlistMode !== 'extras';
+      elements.extraNameInput.required = requiresExtraName;
+      if (!requiresExtraName) {
+        elements.extraNameInput.value = '';
+      }
     } else {
       elements.extraFields.style.display = 'none';
       elements.extraNameInput.required = false;
       elements.extraNameInput.value = '';
       elements.extraTypeSelect.value = 'trailer';
     }
+
+    updatePlaylistControls();
   }
 
   async function loadInitialJobs() {
@@ -597,6 +634,12 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.movieNameInput.addEventListener('change', syncMovieSelection);
   }
 
+  if (elements.playlistModeSelect) {
+    elements.playlistModeSelect.addEventListener('change', () => {
+      updateExtraVisibility();
+    });
+  }
+
   if (elements.extraCheckbox) {
     elements.extraCheckbox.addEventListener('change', updateExtraVisibility);
   }
@@ -605,8 +648,24 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.copyButton.addEventListener('click', copyFullLogToClipboard);
   }
 
+  function parsePlaylistExtraTypes(rawValue) {
+    if (!rawValue) {
+      return [];
+    }
+    return rawValue
+      .split(/\r?\n|,/)
+      .map(entry => entry.trim())
+      .filter(entry => entry.length > 0);
+  }
+
   elements.form.addEventListener('submit', async event => {
     event.preventDefault();
+
+    const playlistMode = elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single';
+    const playlistExtraTypes =
+      elements.playlistExtraTypesInput && playlistMode === 'extras'
+        ? parsePlaylistExtraTypes(elements.playlistExtraTypesInput.value)
+        : [];
 
     const payload = {
       yturl: elements.ytInput ? elements.ytInput.value.trim() : '',
@@ -618,7 +677,9 @@ document.addEventListener('DOMContentLoaded', () => {
       extra: elements.extraCheckbox ? elements.extraCheckbox.checked : false,
       extraType: elements.extraTypeSelect ? elements.extraTypeSelect.value : 'trailer',
       extra_name: elements.extraNameInput ? elements.extraNameInput.value.trim() : '',
-      merge_playlist: elements.mergePlaylistCheckbox ? elements.mergePlaylistCheckbox.checked : false
+      playlist_mode: playlistMode,
+      merge_playlist: playlistMode === 'merge',
+      playlist_extra_types: playlistExtraTypes
     };
 
     resetConsole('Submitting request...');
@@ -635,8 +696,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!payload.movieId) {
       errors.push('Please select a valid movie from the list.');
     }
-    if (payload.extra && !payload.extra_name) {
+    if (payload.extra && !payload.extra_name && playlistMode !== 'extras') {
       errors.push('Please provide an extra name.');
+    }
+
+    if (playlistMode === 'extras' && !payload.extra) {
+      errors.push('Playlist extras require the "Store in subfolder" option.');
+    }
+
+    if (playlistMode === 'extras' && playlistExtraTypes.length === 0) {
+      errors.push('Please provide at least one extra type for the playlist entries.');
     }
 
     if (errors.length) {

@@ -11,7 +11,7 @@ A web UI that turns any publicly accessible YouTube video into a Radarr-ready mo
 * Fetches your entire Radarr library so you can attach a download to the exact title (including extras such as trailers or behind-the-scenes clips).
 * Uses `yt-dlp` with a tuned format selector to prefer high bitrate HLS/H.264 sources before falling back to other codecs.
 * Renames downloads to Plex/Radarr naming conventions and resolves extras into sub-folders when requested.
-* Can merge an entire YouTube playlist into a single Radarr-ready file with one click.
+* Flexible playlist workflows: merge an entire playlist into a single movie file or import each entry as its own extra (Trailer, Behind the Scenes, Featurette, and more).
 * Applies optional Radarr path overrides so the importer works in Docker, Kubernetes, or directly on your workstation.
 * Records download jobs and progress so you can review historical runs.
 
@@ -99,7 +99,13 @@ Everything about the Compose file is customizable - swap ports, change mount poi
 4. Need to rotate cookies? Paste the fresh file or tick “Remove saved cookies” to delete the stored copy. The UI never redisplays saved cookies; it only acknowledges whether a file exists.
 
 ### Playlist downloads
-Enable the **Download entire playlist and merge into a single file** option on the main form to ingest every video from the linked playlist in order. yt2radarr stages each clip with `yt-dlp` and then uses `ffmpeg` to concatenate them losslessly, producing one movie-aligned file without manual editing. If `ffmpeg` is missing the merge will fail early so you can install it or point the container at the binary.
+Use the **Playlist Handling** menu on the main form to decide how yt2radarr should treat a YouTube playlist:
+
+* **Download only this video** – the default single-video workflow.
+* **Download entire playlist and merge into a single file** – stages every clip with `yt-dlp` and concatenates them via `ffmpeg`. This produces a single Radarr-ready movie file and requires `ffmpeg` to be available on the PATH.
+* **Download playlist and save each entry as an extra** – perfect for bonus content drops. Provide one extra type per playlist entry (Trailer, Behind the Scenes, Deleted, Featurette, Interview, Scene, Short, Other) and yt2radarr will fan the downloads out into the matching Radarr subfolders with descriptive filenames.
+
+If you provide fewer extra types than playlist entries the remaining videos are stored using the last supplied type (falling back to **Other** when nothing matches). Every saved extra is logged so you can confirm the mapping from the UI console.
 
 ## 🛠 Tips for portability
 

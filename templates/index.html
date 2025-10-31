@@ -72,9 +72,13 @@
             <label for="extra">Store in subfolder (treat as extra)</label>
           </div>
 
-          <div class="form-check">
-            <input type="checkbox" id="mergePlaylist" name="mergePlaylist" />
-            <label for="mergePlaylist">Download entire playlist and merge into a single file</label>
+          <div class="form-group">
+            <label for="playlistMode">Playlist Handling</label>
+            <select id="playlistMode" name="playlistMode">
+              <option value="single" selected>Download only this video</option>
+              <option value="merge">Download entire playlist and merge into a single file</option>
+              <option value="extras">Download playlist and save each entry as an extra</option>
+            </select>
           </div>
 
           <div id="extraFields" style="display: none;">
@@ -100,6 +104,23 @@
                 name="extra_name"
                 placeholder="e.g., Official Teaser"
               />
+            </div>
+          </div>
+
+          <div id="playlistExtrasFields" style="display: none;">
+            <div class="form-group">
+              <label for="playlistExtraTypes">Playlist Extra Types</label>
+              <textarea
+                id="playlistExtraTypes"
+                name="playlistExtraTypes"
+                rows="3"
+                placeholder="Trailer\nBehind the Scenes\nFeaturette"
+              ></textarea>
+              <p class="help-text">
+                Provide one extra type per line in playlist order. Supported types:
+                Trailer, Behind the Scenes, Deleted, Featurette, Interview, Scene,
+                Short, Other.
+              </p>
             </div>
           </div>
 

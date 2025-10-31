@@ -120,6 +120,7 @@ _ESSENTIAL_PHRASES = (
     "fetching radarr details",
     "resolved youtube format",
     "merging playlist videos",
+    "saving playlist extra",
 )
 
 
@@ -456,6 +457,33 @@ EXTRA_TYPE_LABELS = {
 }
 
 
+EXTRA_TYPE_ALIASES = {
+    "trailers": "trailer",
+    "behindthescene": "behindthescenes",
+    "behindthescenesclip": "behindthescenes",
+    "behindthescenesfeature": "behindthescenes",
+    "behindthescenesfeaturette": "behindthescenes",
+    "deletedscene": "deleted",
+    "deletedscenes": "deleted",
+    "featurettes": "featurette",
+    "interviews": "interview",
+    "scenes": "scene",
+    "shorts": "short",
+    "extras": "other",
+}
+
+
+def normalize_extra_type_key(raw_value: str) -> Optional[str]:
+    """Return a canonical extra type key for a user-provided value."""
+
+    token = re.sub(r"[^a-z]", "", str(raw_value or "").lower())
+    if not token:
+        return None
+    if token in EXTRA_TYPE_LABELS:
+        return token
+    return EXTRA_TYPE_ALIASES.get(token)
+
+
 def _describe_job(payload: Dict) -> Dict:
     """Build presentation metadata for a job payload."""
     movie_label = (payload.get("movieName") or payload.get("title") or "").strip()
@@ -465,7 +493,20 @@ def _describe_job(payload: Dict) -> Dict:
     extra_type = (payload.get("extraType") or "trailer").strip().lower()
     extra_name = (payload.get("extra_name") or "").strip()
     merge_playlist = bool(payload.get("merge_playlist"))
+    playlist_mode = (payload.get("playlist_mode") or ("merge" if merge_playlist else "single")).strip().lower()
+    playlist_extra_types = [
+        value
+        for value in (
+            normalize_extra_type_key(entry)
+            for entry in payload.get("playlist_extra_types") or []
+        )
+        if value
+    ]
+    if playlist_extra_types:
+        extra = True
     extra_label = extra_name or EXTRA_TYPE_LABELS.get(extra_type, extra_type.capitalize())
+    if playlist_extra_types:
+        extra_label = "Playlist Extras"
     if extra and extra_label:
         label = f"{movie_label} – {extra_label}"
         subtitle = f"Extra • {extra_label}"
@@ -475,8 +516,14 @@ def _describe_job(payload: Dict) -> Dict:
     metadata = []
     if extra:
         metadata.append("Stored as extra content")
-    if merge_playlist:
+    if merge_playlist or playlist_mode == "merge":
         metadata.append("Playlist merged into single file")
+    if playlist_extra_types:
+        readable_types = ", ".join(
+            EXTRA_TYPE_LABELS.get(value, value.capitalize()) for value in playlist_extra_types
+        )
+        if readable_types:
+            metadata.append(f"Playlist extras: {readable_types}")
     return {"label": label or "Radarr Download", "subtitle": subtitle, "metadata": metadata}
 
 
@@ -516,10 +563,38 @@ def create():
     if not movie_id:
         error("No movie selected. Please choose a movie from the suggestions list.")
 
+    playlist_mode = (data.get("playlist_mode") or "single").strip().lower()
+    allowed_playlist_modes = {"single", "merge", "extras"}
+    if playlist_mode not in allowed_playlist_modes:
+        error("Invalid playlist handling option selected.")
+
+    raw_playlist_extra_types = data.get("playlist_extra_types")
+    playlist_extra_types: List[str] = []
+    if isinstance(raw_playlist_extra_types, list):
+        for entry in raw_playlist_extra_types:
+            normalized = normalize_extra_type_key(entry)
+            if normalized:
+                playlist_extra_types.append(normalized)
+            elif str(entry).strip():
+                error(f"Unknown playlist extra type '{entry}'.")
+
     extra = bool(data.get("extra"))
     extra_name = (data.get("extra_name") or "").strip()
-    if extra and not extra_name:
+
+    if playlist_mode == "extras":
+        if not extra:
+            error("Playlist extras require storing the videos as extras.")
+        if not playlist_extra_types:
+            error("Provide at least one extra type for the playlist entries.")
+        extra = True
+    elif extra and not extra_name:
         error("Extra name is required when storing in a subfolder.")
+
+    selected_extra_type = (data.get("extraType") or "trailer").strip().lower()
+    if playlist_mode == "extras" and playlist_extra_types:
+        selected_extra_type = playlist_extra_types[0]
+
+    merge_playlist = playlist_mode == "merge"
 
     if errors:
         return jsonify({"logs": logs}), 400
@@ -532,9 +607,11 @@ def create():
         "year": (data.get("year") or "").strip(),
         "tmdb": (data.get("tmdb") or "").strip(),
         "extra": extra,
-        "extraType": (data.get("extraType") or "trailer").strip().lower(),
+        "extraType": selected_extra_type,
         "extra_name": extra_name,
-        "merge_playlist": bool(data.get("merge_playlist")),
+        "merge_playlist": merge_playlist,
+        "playlist_mode": playlist_mode,
+        "playlist_extra_types": playlist_extra_types,
     }
 
     descriptors = _describe_job(payload)
@@ -598,6 +675,24 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         title = (payload.get("title") or "").strip()
         year = (payload.get("year") or "").strip()
         merge_playlist = bool(payload.get("merge_playlist"))
+        playlist_mode = (
+            payload.get("playlist_mode")
+            or ("merge" if merge_playlist else "single")
+        ).strip().lower()
+        raw_playlist_extra_types = payload.get("playlist_extra_types") or []
+        playlist_extra_types: List[str] = []
+        for entry in raw_playlist_extra_types:
+            normalized = normalize_extra_type_key(entry)
+            if normalized:
+                playlist_extra_types.append(normalized)
+        if playlist_mode == "extras" and not playlist_extra_types:
+            warn("Playlist extras mode selected but no valid extra types were provided.")
+        if playlist_mode != "extras":
+            playlist_extra_types = []
+        merge_playlist = playlist_mode == "merge"
+        payload["playlist_mode"] = playlist_mode
+        payload["playlist_extra_types"] = playlist_extra_types
+        payload["merge_playlist"] = merge_playlist
 
         resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
         if resolved is None or not str(resolved.get("id")):
@@ -606,6 +701,8 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         movie_id = str(resolved.get("id"))
 
         extra_type = (payload.get("extraType") or "trailer").strip().lower()
+        if playlist_extra_types:
+            extra_type = playlist_extra_types[0]
         allowed_extra_types = {
             "trailer",
             "behindthescenes",
@@ -632,7 +729,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             },
         )
 
-        extra = bool(payload.get("extra"))
+        extra = bool(payload.get("extra")) or bool(playlist_extra_types)
         extra_name = (payload.get("extra_name") or "").strip()
         try:
             log(f"Fetching Radarr details for movie ID {movie_id}.")
@@ -673,7 +770,12 @@ def process_download_job(job_id: str, payload: Dict) -> None:
         }
 
         target_dir = movie_path
-        if extra:
+        if playlist_extra_types:
+            log(
+                "Playlist extras requested; videos will be saved into their "
+                "respective extra subfolders."
+            )
+        elif extra:
             subfolder = folder_map.get(extra_type, extra_type.capitalize() + "s")
             target_dir = os.path.join(movie_path, subfolder)
             os.makedirs(target_dir, exist_ok=True)
@@ -683,6 +785,20 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         if merge_playlist:
             log("Playlist download requested; videos will be merged into a single file.")
+        elif playlist_extra_types:
+            readable_types = ", ".join(
+                EXTRA_TYPE_LABELS.get(value, value.capitalize())
+                for value in playlist_extra_types
+            )
+            if readable_types:
+                log(
+                    "Playlist download requested; entries will be processed as "
+                    f"extras ({readable_types})."
+                )
+            else:
+                log(
+                    "Playlist download requested; entries will be processed as extras."
+                )
 
         movie_stem = build_movie_stem(movie)
         log(f"Resolved Radarr movie stem to '{movie_stem}'.")
@@ -698,10 +814,10 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 log(f"Using extra label '{extra_label}'.")
 
         descriptive = extra_name
-        default_label = "Playlist" if merge_playlist else "Video"
+        default_label = "Playlist" if (merge_playlist or playlist_extra_types) else "Video"
         if descriptive:
             log(f"Using custom descriptive name '{descriptive}'.")
-        elif merge_playlist:
+        elif merge_playlist or playlist_extra_types:
             try:
                 log("Querying yt-dlp for playlist title.")
                 yt_cmd = [
@@ -794,13 +910,19 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
         template_base = filename_base.replace("%", "%%")
         playlist_temp_dir: Optional[str] = None
-        if merge_playlist:
+        if merge_playlist or playlist_extra_types:
             playlist_temp_dir = os.path.join(target_dir, f".yt2radarr_playlist_{job_id}")
             os.makedirs(playlist_temp_dir, exist_ok=True)
-            log(
-                "Playlist merge enabled. Downloads will be staged in "
-                f"'{os.path.basename(playlist_temp_dir)}'."
-            )
+            if merge_playlist:
+                log(
+                    "Playlist merge enabled. Downloads will be staged in "
+                    f"'{os.path.basename(playlist_temp_dir)}'."
+                )
+            else:
+                log(
+                    "Playlist extras enabled. Downloads will be staged in "
+                    f"'{os.path.basename(playlist_temp_dir)}'."
+                )
             target_template = os.path.join(
                 playlist_temp_dir, "%(playlist_index)05d - %(title)s.%(ext)s"
             )
@@ -826,7 +948,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             format_selector,
             "--skip-download",
         ]
-        if merge_playlist:
+        if merge_playlist or playlist_extra_types:
             info_command.append("--yes-playlist")
         info_command += [
             "--print-json",
@@ -949,7 +1071,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             command += ["--cookies", cookie_path]
         command += ["--newline"]
         command += ["-f", format_selector]
-        if merge_playlist:
+        if merge_playlist or playlist_extra_types:
             command.append("--yes-playlist")
         command += ["-o", target_template, yt_url]
 
@@ -1141,6 +1263,123 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     continue
 
             downloaded_candidates = [merged_output_path]
+
+        if playlist_extra_types:
+            if not playlist_temp_dir:
+                fail("Internal error: playlist staging directory was not created.")
+                return
+
+            active_candidates = [
+                path
+                for path in downloaded_candidates
+                if os.path.isfile(path) and not _is_intermediate_file(path)
+            ]
+            if not active_candidates:
+                active_candidates = [
+                    path for path in downloaded_candidates if os.path.isfile(path)
+                ]
+            if not active_candidates:
+                fail(
+                    "Playlist extras download completed but no video files were produced."
+                )
+                return
+
+            active_candidates.sort()
+
+            fallback_type = (
+                playlist_extra_types[-1]
+                if playlist_extra_types
+                else extra_type
+            )
+            if fallback_type not in allowed_extra_types:
+                fallback_type = "other"
+            provided_count = len(playlist_extra_types)
+            if provided_count and len(active_candidates) > provided_count:
+                warn(
+                    "Playlist contained {video_count} entries but only "
+                    "{type_count} extra types were supplied. Remaining entries "
+                    "will use '{fallback}'."
+                    .format(
+                        video_count=len(active_candidates),
+                        type_count=provided_count,
+                        fallback=EXTRA_TYPE_LABELS.get(
+                            fallback_type, fallback_type.capitalize()
+                        ),
+                    )
+                )
+
+            saved_paths: List[str] = []
+
+            for index, candidate in enumerate(active_candidates, start=1):
+                assigned_type = (
+                    playlist_extra_types[index - 1]
+                    if index - 1 < provided_count
+                    else fallback_type
+                )
+                if assigned_type not in allowed_extra_types:
+                    assigned_type = "other"
+                label = EXTRA_TYPE_LABELS.get(
+                    assigned_type, assigned_type.capitalize()
+                )
+                dest_subfolder = folder_map.get(
+                    assigned_type, assigned_type.capitalize() + "s"
+                )
+                dest_dir = os.path.join(movie_path, dest_subfolder)
+                os.makedirs(dest_dir, exist_ok=True)
+
+                entry_title = os.path.splitext(os.path.basename(candidate))[0]
+                sanitized_entry_title = sanitize_filename(entry_title)
+                base_label = sanitize_filename(label) or assigned_type
+                canonical_stem = " ".join(
+                    part for part in [movie_stem, base_label] if part
+                ).strip()
+                if sanitized_entry_title:
+                    lowered_stem = canonical_stem.lower()
+                    if sanitized_entry_title.lower() not in lowered_stem:
+                        canonical_stem = f"{canonical_stem} - {sanitized_entry_title}".strip()
+                canonical_stem = canonical_stem or f"{movie_stem} {base_label}".strip()
+                canonical_stem = sanitize_filename(canonical_stem) or (
+                    f"{movie_stem} {base_label}".strip() or movie_stem
+                )
+
+                extension = os.path.splitext(candidate)[1] or ""
+                dest_filename = f"{canonical_stem}{extension}"
+                if os.path.exists(os.path.join(dest_dir, dest_filename)):
+                    suffix_index = 1
+                    base_name, ext_part = os.path.splitext(dest_filename)
+                    while True:
+                        suffix_index += 1
+                        alt_filename = f"{base_name} ({suffix_index}){ext_part}"
+                        if not os.path.exists(os.path.join(dest_dir, alt_filename)):
+                            dest_filename = alt_filename
+                            break
+                dest_path = os.path.join(dest_dir, dest_filename)
+
+                try:
+                    os.replace(candidate, dest_path)
+                except OSError as exc:
+                    fail(
+                        "Failed to move playlist extra '{label}' to "
+                        f"'{dest_filename}': {exc}"
+                    )
+                    return
+
+                saved_paths.append(dest_path)
+                log(
+                    f"Saving playlist extra #{index}: '{label}' -> "
+                    f"'{dest_filename}'."
+                )
+
+            if playlist_temp_dir and os.path.isdir(playlist_temp_dir):
+                try:
+                    shutil.rmtree(playlist_temp_dir)
+                except OSError:
+                    pass
+
+            _job_status(job_id, "processing", progress=100)
+            log(f"Success! Saved {len(saved_paths)} playlist extras.")
+            _mark_job_success(job_id)
+            return
 
         final_candidates = [
             path for path in downloaded_candidates if not _is_intermediate_file(path)
