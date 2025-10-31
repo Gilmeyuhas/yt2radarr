@@ -39,6 +39,28 @@ h1 {
   gap: 10px;
 }
 
+.header-actions .button-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.toggle-console-button {
+  gap: 6px;
+}
+
+.toggle-console-button[aria-expanded="false"] {
+  background: #2f81f7;
+  border-color: #2f81f7;
+  color: #fff;
+}
+
+.toggle-console-button[aria-expanded="false"]:hover {
+  background: #1f6feb;
+  border-color: #1f6feb;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -424,10 +446,19 @@ button[type="submit"]:disabled {
     flex-wrap: wrap;
   }
 
+  .header-actions .button-secondary {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+
   .header-actions .link-button {
     flex: 1 1 auto;
     justify-content: center;
   }
+}
+
+body[data-console-visible="false"] .side-column {
+  display: none;
 }
 
 .activity-panel {
