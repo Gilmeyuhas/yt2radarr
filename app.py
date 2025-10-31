@@ -50,46 +50,15 @@ def _extract_first_json_block(text: str) -> Optional[str]:
     if not text:
         return None
 
-    start_index: Optional[int] = None
-    stack: List[str] = []
-    in_string = False
-    escape_next = False
-
-    opening_to_closing = {"{": "}", "[": "]"}
-    closing_characters = set(opening_to_closing.values())
-
-    for index, char in enumerate(text):
-        if start_index is None:
-            if char in opening_to_closing:
-                start_index = index
-                stack.append(opening_to_closing[char])
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"[\{\[]", text):
+        start = match.start()
+        try:
+            _, length = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
             continue
-
-        if escape_next:
-            escape_next = False
-            continue
-
-        if char == "\\":
-            escape_next = in_string
-            continue
-
-        if char == '"':
-            in_string = not in_string
-            continue
-
-        if in_string:
-            continue
-
-        if char in opening_to_closing:
-            stack.append(opening_to_closing[char])
-            continue
-
-        if char in closing_characters:
-            if not stack or char != stack[-1]:
-                break
-            stack.pop()
-            if not stack and start_index is not None:
-                return text[start_index : index + 1]
+        end = start + length
+        return text[start:end]
 
     return None
 
@@ -689,9 +658,11 @@ def _fetch_playlist_preview(
     limit = max(1, min(limit, 200))
     command = [
         "yt-dlp",
+        "--ignore-config",
         "--skip-download",
         "--dump-single-json",
         "--no-warnings",
+        "--no-progress",
         "--playlist-end",
         str(limit),
     ]
