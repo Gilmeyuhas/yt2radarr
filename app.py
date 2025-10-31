@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -68,6 +69,70 @@ def _format_filesize(value: Optional[float]) -> str:
         size /= 1024
         unit_index += 1
     return f"{size:.1f} {units[unit_index]}"
+
+
+def _format_duration(value: Optional[Any]) -> str:
+    """Return a human-readable duration string for seconds."""
+
+    if value is None:
+        return ""
+    seconds: Optional[int]
+    if isinstance(value, (int, float)):
+        seconds = int(value)
+    else:
+        try:
+            seconds = int(float(value))
+        except (TypeError, ValueError):
+            seconds = None
+    if seconds is None or seconds < 0:
+        return ""
+    hours, remainder = divmod(seconds, 3600)
+    minutes, sec = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{sec:02d}"
+    return f"{minutes:d}:{sec:02d}"
+
+
+def _format_upload_date(value: Optional[str]) -> str:
+    """Return a YYYY-MM-DD string from a YouTube upload date."""
+
+    if not value:
+        return ""
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if len(digits) != 8:
+        return ""
+    year = digits[0:4]
+    month = digits[4:6]
+    day = digits[6:8]
+    return f"{year}-{month}-{day}"
+
+
+def _select_thumbnail(thumbnails: Any) -> str:
+    """Return the most appropriate thumbnail URL from yt-dlp data."""
+
+    if not isinstance(thumbnails, list):
+        return ""
+    best_url = ""
+    best_score = -1
+    for thumb in thumbnails:
+        if not isinstance(thumb, dict):
+            continue
+        url = str(thumb.get("url") or thumb.get("thumbnail") or "").strip()
+        if not url:
+            continue
+        width = thumb.get("width")
+        height = thumb.get("height")
+        score = 0
+        if isinstance(width, (int, float)) and isinstance(height, (int, float)):
+            score = int(width) * int(height)
+        elif isinstance(width, (int, float)):
+            score = int(width)
+        elif isinstance(height, (int, float)):
+            score = int(height)
+        if score >= best_score:
+            best_score = score
+            best_url = url
+    return best_url
 def _default_config() -> Dict:
     return {
         "radarr_url": (os.environ.get("RADARR_URL") or "").rstrip("/"),
@@ -80,6 +145,23 @@ def _default_config() -> Dict:
 
 
 _CACHE: Dict[str, Optional[Any]] = {"config": None, "movies": None}
+
+_YOUTUBE_SEARCH_CACHE: Dict[Tuple[str, int], Tuple[float, List[Dict[str, Any]]]] = {}
+_YOUTUBE_SEARCH_CACHE_TTL_SECONDS = 300
+_YOUTUBE_SEARCH_CACHE_MAX_ENTRIES = 32
+
+_YOUTUBE_SEARCH_PROCESS_TIMEOUT = 18
+
+_YOUTUBE_WEB_TIMEOUT = (4, 8)
+
+_YOUTUBE_WEB_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/121.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 jobs_repo = JobRepository(JOBS_PATH, max_items=50)
 
@@ -107,6 +189,476 @@ def _mark_job_success(job_id: str) -> None:
 def _job_status(job_id: str, status: str, progress: Optional[float] = None) -> None:
     """Persist a status update for a job."""
     jobs_repo.status(job_id, status, progress=progress)
+
+
+def _normalise_youtube_result(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Transform a yt-dlp search entry into a response payload."""
+
+    if not isinstance(entry, dict):
+        return None
+
+    url = (
+        str(entry.get("original_url") or "").strip()
+        or str(entry.get("webpage_url") or "").strip()
+        or str(entry.get("url") or "").strip()
+    )
+    video_id = str(entry.get("id") or "").strip()
+    if not url and video_id:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+    if not url:
+        return None
+
+    duration = entry.get("duration")
+    try:
+        duration_seconds = int(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration_seconds = None
+
+    view_count = entry.get("view_count")
+    if isinstance(view_count, (int, float)):
+        view_count_value: Optional[int] = int(view_count)
+    else:
+        try:
+            view_count_value = int(view_count) if view_count is not None else None
+        except (TypeError, ValueError):
+            view_count_value = None
+
+    live_status = str(entry.get("live_status") or "").lower()
+    is_live = bool(entry.get("is_live")) or live_status in {"is_live", "was_live", "not_yet_live"}
+
+    return {
+        "id": video_id or url,
+        "title": str(entry.get("title") or "Untitled video").strip() or "Untitled video",
+        "url": url,
+        "duration": duration_seconds,
+        "duration_text": _format_duration(duration_seconds),
+        "channel": str(entry.get("uploader") or entry.get("channel") or "").strip(),
+        "upload_date": _format_upload_date(entry.get("upload_date")),
+        "view_count": view_count_value,
+        "thumbnail": _select_thumbnail(entry.get("thumbnails")),
+        "description": str(entry.get("description") or "").strip(),
+        "live": is_live,
+    }
+
+
+def _normalise_search_query(value: str) -> str:
+    """Return a normalised form of a search query for caching."""
+
+    cleaned = " ".join(str(value or "").split())
+    return cleaned.strip().lower()
+
+
+def _get_cached_youtube_results(query: str, limit: int) -> Optional[List[Dict[str, Any]]]:
+    """Return cached search results for the given query and limit."""
+
+    now = time.time()
+    key = (query, limit)
+    entry = _YOUTUBE_SEARCH_CACHE.get(key)
+    if entry:
+        timestamp, results = entry
+        if now - timestamp <= _YOUTUBE_SEARCH_CACHE_TTL_SECONDS:
+            return [dict(item) for item in results]
+        _YOUTUBE_SEARCH_CACHE.pop(key, None)
+
+    # Fall back to a cache entry that contains more results than required.
+    for (cached_query, cached_limit), (timestamp, results) in list(_YOUTUBE_SEARCH_CACHE.items()):
+        if cached_query != query or cached_limit < limit:
+            continue
+        if now - timestamp > _YOUTUBE_SEARCH_CACHE_TTL_SECONDS:
+            _YOUTUBE_SEARCH_CACHE.pop((cached_query, cached_limit), None)
+            continue
+        return [dict(item) for item in results[:limit]]
+
+    return None
+
+
+def _store_cached_youtube_results(query: str, limit: int, results: List[Dict[str, Any]]) -> None:
+    """Persist search results in the in-memory cache."""
+
+    # Store a shallow copy so the cached data is not mutated later.
+    _YOUTUBE_SEARCH_CACHE[(query, limit)] = (time.time(), [dict(item) for item in results])
+
+    if len(_YOUTUBE_SEARCH_CACHE) <= _YOUTUBE_SEARCH_CACHE_MAX_ENTRIES:
+        return
+
+    # Prune the oldest cache entries when exceeding the limit.
+    sorted_entries = sorted(
+        _YOUTUBE_SEARCH_CACHE.items(),
+        key=lambda item: item[1][0],
+    )
+    for key, _ in sorted_entries[:-_YOUTUBE_SEARCH_CACHE_MAX_ENTRIES]:
+        _YOUTUBE_SEARCH_CACHE.pop(key, None)
+
+
+def _extract_initial_data_from_html(html: str) -> Optional[Dict[str, Any]]:
+    """Parse the embedded ytInitialData JSON from a YouTube HTML response."""
+
+    if not html:
+        return None
+
+    markers = ["var ytInitialData =", "ytInitialData ="]
+    for marker in markers:
+        index = html.find(marker)
+        if index == -1:
+            continue
+        brace_start = html.find("{", index)
+        if brace_start == -1:
+            continue
+        depth = 0
+        position = brace_start
+        while position < len(html):
+            char = html[position]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(html[brace_start : position + 1])
+                    except json.JSONDecodeError:
+                        break
+            position += 1
+    return None
+
+
+def _join_runs_text(data: Any) -> str:
+    """Return text content from YouTube's run-based structures."""
+
+    if isinstance(data, dict):
+        if "simpleText" in data and data["simpleText"]:
+            return str(data["simpleText"])
+        runs = data.get("runs")
+        if isinstance(runs, list):
+            text_parts: List[str] = []
+            for run in runs:
+                if isinstance(run, dict) and run.get("text"):
+                    text_parts.append(str(run["text"]))
+            if text_parts:
+                return "".join(text_parts)
+    elif isinstance(data, list):
+        text_parts = [str(item) for item in data if isinstance(item, (str, int, float))]
+        if text_parts:
+            return "".join(text_parts)
+    elif isinstance(data, (str, int, float)):
+        return str(data)
+    return ""
+
+
+def _parse_duration_seconds(text: str) -> Optional[int]:
+    """Return the duration in seconds from a HH:MM:SS style string."""
+
+    if not text or not isinstance(text, str):
+        return None
+    if not any(ch.isdigit() for ch in text):
+        return None
+    parts = text.strip().split(":")
+    values: List[int] = []
+    for part in parts:
+        try:
+            values.append(int(part))
+        except (TypeError, ValueError):
+            return None
+    seconds = 0
+    for value in values:
+        seconds = seconds * 60 + value
+    return seconds
+
+
+def _parse_view_count(text: str) -> Optional[int]:
+    """Convert a human-readable view count string into an integer."""
+
+    if not text:
+        return None
+    lowered = text.lower()
+    match = re.search(r"([\d,.]+)\s*([kmb])", lowered)
+    if match:
+        number_text, suffix = match.groups()
+        try:
+            number = float(number_text.replace(",", ""))
+        except ValueError:
+            number = None
+        if number is not None:
+            multiplier = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}.get(suffix, 1)
+            return int(number * multiplier)
+    digits = re.sub(r"[^0-9]", "", text)
+    if digits:
+        try:
+            return int(digits)
+        except ValueError:
+            return None
+    return None
+
+
+def _is_live_video(render: Dict[str, Any]) -> bool:
+    """Determine whether a video renderer represents a live stream."""
+
+    badges = render.get("badges") or []
+    for badge in badges:
+        metadata = badge.get("metadataBadgeRenderer") if isinstance(badge, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        label = _join_runs_text(metadata.get("label"))
+        style = metadata.get("style", "").upper()
+        if "LIVE" in label.upper() or style == "BADGE_STYLE_TYPE_LIVE_NOW":
+            return True
+
+    overlays = render.get("thumbnailOverlays") or []
+    for overlay in overlays:
+        overlay_renderer = overlay.get("thumbnailOverlayTimeStatusRenderer")
+        if not isinstance(overlay_renderer, dict):
+            continue
+        text = _join_runs_text(overlay_renderer.get("text"))
+        style = (overlay_renderer.get("style") or "").upper()
+        if "LIVE" in text.upper() or style == "LIVE":
+            return True
+
+    if render.get("isUpcoming") or render.get("upcomingEventData"):
+        return True
+
+    return False
+
+
+def _extract_description(render: Dict[str, Any]) -> str:
+    """Return the most descriptive snippet available for the result."""
+
+    snippets = render.get("detailedMetadataSnippets")
+    if isinstance(snippets, list):
+        for snippet in snippets:
+            if isinstance(snippet, dict):
+                text = _join_runs_text(snippet.get("snippetText"))
+                if text:
+                    return text
+    description = render.get("descriptionSnippet")
+    text = _join_runs_text(description)
+    return text
+
+
+def _normalise_web_youtube_result(render: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Convert a YouTube web search renderer into the API response shape."""
+
+    if not isinstance(render, dict):
+        return None
+
+    video_id = render.get("videoId")
+    if not video_id:
+        return None
+
+    title = _join_runs_text(render.get("title")) or "Untitled video"
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    length_text = _join_runs_text(render.get("lengthText"))
+    view_count_text = _join_runs_text(render.get("viewCountText")) or _join_runs_text(
+        render.get("shortViewCountText")
+    )
+    channel = _join_runs_text(render.get("ownerText")) or _join_runs_text(
+        render.get("shortBylineText")
+    )
+    upload_date = _join_runs_text(render.get("publishedTimeText"))
+
+    thumbnail = ""
+    thumbnails = (
+        render.get("thumbnail", {}).get("thumbnails")
+        if isinstance(render.get("thumbnail"), dict)
+        else []
+    )
+    if isinstance(thumbnails, list):
+        best = sorted(
+            [thumb for thumb in thumbnails if isinstance(thumb, dict) and thumb.get("url")],
+            key=lambda item: (item.get("width") or 0) * (item.get("height") or 0),
+            reverse=True,
+        )
+        if best:
+            thumbnail = best[0].get("url", "")
+            if thumbnail.startswith("//"):
+                thumbnail = f"https:{thumbnail}"
+
+    duration_seconds = _parse_duration_seconds(length_text)
+    view_count = _parse_view_count(view_count_text)
+    is_live = _is_live_video(render)
+    duration_text = "LIVE" if is_live else (length_text or "")
+
+    return {
+        "id": video_id,
+        "title": title,
+        "url": url,
+        "duration": duration_seconds,
+        "duration_text": duration_text,
+        "channel": channel,
+        "upload_date": upload_date,
+        "view_count": view_count,
+        "thumbnail": thumbnail,
+        "description": _extract_description(render),
+        "live": is_live,
+    }
+
+
+def _iter_video_renderers(initial_data: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
+    """Yield video renderers from YouTube's search response structure."""
+
+    contents = (initial_data.get("contents") or {}).get("twoColumnSearchResultsRenderer")
+    if not isinstance(contents, dict):
+        return
+    primary = contents.get("primaryContents") or {}
+    section_list = primary.get("sectionListRenderer") or {}
+    sections = section_list.get("contents") or []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        item_section = section.get("itemSectionRenderer")
+        if item_section and isinstance(item_section, dict):
+            for item in item_section.get("contents") or []:
+                if not isinstance(item, dict):
+                    continue
+                video = item.get("videoRenderer")
+                if isinstance(video, dict):
+                    yield video
+                rich_item = item.get("richItemRenderer")
+                if isinstance(rich_item, dict):
+                    content = rich_item.get("content")
+                    if isinstance(content, dict):
+                        video = content.get("videoRenderer")
+                        if isinstance(video, dict):
+                            yield video
+                shelf = item.get("shelfRenderer")
+                if isinstance(shelf, dict):
+                    shelf_items = (
+                        shelf.get("content", {})
+                        .get("verticalListRenderer", {})
+                        .get("items", [])
+                    )
+                    for shelf_item in shelf_items:
+                        if isinstance(shelf_item, dict):
+                            video = shelf_item.get("videoRenderer")
+                            if isinstance(video, dict):
+                                yield video
+        compact = section.get("compactVideoRenderer")
+        if isinstance(compact, dict):
+            yield compact
+
+
+def _search_youtube_via_web(query: str, limit: int) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Attempt to retrieve search results directly from YouTube's web interface."""
+
+    try:
+        response = requests.get(
+            "https://www.youtube.com/results",
+            params={
+                "search_query": query,
+                "hl": "en",
+                "gl": "US",
+                "persist_hl": 1,
+                "persist_gl": 1,
+            },
+            headers=_YOUTUBE_WEB_HEADERS,
+            timeout=_YOUTUBE_WEB_TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:  # pragma: no cover - depends on network
+        app.logger.debug("Fast YouTube search failed: %s", exc)
+        return [], "Fast YouTube search failed. Retrying with yt-dlp."
+
+    initial_data = _extract_initial_data_from_html(response.text)
+    if not initial_data:
+        app.logger.debug("Fast YouTube search parsing failed for query '%s'", query)
+        return [], "Unable to parse quick YouTube results."
+
+    results: List[Dict[str, Any]] = []
+    for renderer in _iter_video_renderers(initial_data):
+        normalised = _normalise_web_youtube_result(renderer)
+        if not normalised:
+            continue
+        results.append(normalised)
+        if len(results) >= limit:
+            break
+
+    if not results:
+        app.logger.debug("Fast YouTube search returned no video entries for '%s'", query)
+        return [], "No quick YouTube results were found."
+
+    return results, None
+
+
+def _search_youtube_via_ytdlp(
+    query: str, limit: int
+) -> Tuple[List[Dict[str, Any]], Optional[Tuple[Dict[str, Any], int]]]:
+    """Run yt-dlp as a fallback search strategy."""
+
+    command = [
+        "yt-dlp",
+        "-J",
+        "--no-warnings",
+        "--no-playlist",
+        "--skip-download",
+        "--socket-timeout",
+        "10",
+        "--force-ipv4",
+        f"ytsearch{limit}:{query}",
+    ]
+
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        return [], ({"error": f"Failed to execute yt-dlp: {exc}", "results": []}, 500)
+
+    try:
+        raw_stdout, raw_stderr = process.communicate(timeout=_YOUTUBE_SEARCH_PROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.communicate()
+        except Exception:  # pragma: no cover - best effort cleanup
+            pass
+        return [], ({"error": "YouTube search timed out.", "results": []}, 504)
+    except OSError as exc:
+        return [], ({"error": f"Failed to execute yt-dlp: {exc}", "results": []}, 500)
+
+    raw_stdout = raw_stdout or ""
+    parsed_output: Any
+    if raw_stdout.strip():
+        try:
+            parsed_output = json.loads(raw_stdout)
+        except json.JSONDecodeError:
+            parsed_output = []
+            for line in raw_stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed_output.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    else:
+        parsed_output = []
+
+    entries: List[Any] = []
+    if isinstance(parsed_output, dict):
+        potential_entries = parsed_output.get("entries")
+        if isinstance(potential_entries, list):
+            entries = potential_entries
+        else:
+            entries = [parsed_output]
+    elif isinstance(parsed_output, list):
+        entries = parsed_output
+
+    results: List[Dict[str, Any]] = []
+    for entry in entries:
+        normalised = _normalise_youtube_result(entry)
+        if not normalised:
+            continue
+        results.append(normalised)
+        if len(results) >= limit:
+            break
+
+    if process.returncode not in (0,) and not results:
+        error_message = (raw_stderr or "").strip().splitlines() or ["yt-dlp reported an error."]
+        return [], ({"error": error_message[0], "results": []}, 502)
+
+    return results, None
 
 
 _NOISY_WARNING_SNIPPETS = (
@@ -739,6 +1291,74 @@ def _format_quality_profile(entry: Dict[str, Any]) -> Dict[str, Any]:
         "id": entry.get("id"),
         "name": entry.get("name") or f"Profile {entry.get('id')}",
     }
+
+
+@app.route("/youtube/search", methods=["GET"])
+def youtube_search():
+    """Search YouTube for videos using yt-dlp and return structured results."""
+
+    query = str(request.args.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "Query parameter 'query' is required.", "results": []}), 400
+
+    limit_raw = str(request.args.get("limit") or "").strip()
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 6
+    if limit <= 0:
+        limit = 1
+    limit = min(limit, 20)
+
+    normalized_query = _normalise_search_query(query)
+    if not normalized_query:
+        return jsonify({"error": "Query parameter 'query' is required.", "results": []}), 400
+
+    cached_results = _get_cached_youtube_results(normalized_query, limit)
+    if cached_results is not None:
+        return jsonify({"results": cached_results, "cached": True})
+
+    warnings: List[str] = []
+    results: List[Dict[str, Any]] = []
+    source: Optional[str] = None
+
+    web_results, web_error = _search_youtube_via_web(query, limit)
+    if web_results:
+        results = web_results
+        source = "web"
+    else:
+        if web_error:
+            warnings.append(web_error)
+        ytdlp_results, ytdlp_error = _search_youtube_via_ytdlp(query, limit)
+        if ytdlp_results:
+            results = ytdlp_results
+            source = "yt-dlp"
+        else:
+            if ytdlp_error is not None:
+                payload, status = ytdlp_error
+                response_payload = dict(payload)
+                if warnings:
+                    response_payload.setdefault("warnings", []).extend(warnings)
+                return jsonify(response_payload), status
+            if warnings:
+                error_message = warnings[-1]
+                extra_warnings = warnings[:-1]
+                response_payload: Dict[str, Any] = {"results": [], "error": error_message}
+                if extra_warnings:
+                    response_payload["warnings"] = extra_warnings
+                return jsonify(response_payload)
+            return jsonify({"results": []})
+
+    if results:
+        _store_cached_youtube_results(normalized_query, limit, results)
+
+    payload: Dict[str, Any] = {"results": results}
+    if source:
+        payload["source"] = source
+    if warnings:
+        payload["warnings"] = warnings
+
+    return jsonify(payload)
 
 
 @app.route("/radarr/options", methods=["GET"])

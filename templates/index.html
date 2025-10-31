@@ -43,6 +43,37 @@
     <div class="page-layout">
       <div class="main-column">
         <form id="movieForm" novalidate>
+          <div class="form-group form-group-vertical">
+            <label for="ytSearch">Search YouTube</label>
+            <div class="form-group-body">
+              <div class="yt-search-controls">
+                <input
+                  type="text"
+                  id="ytSearch"
+                  name="ytSearch"
+                  placeholder="Search for a YouTube video..."
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <button type="button" id="ytSearchButton" class="button-secondary">
+                  Search
+                </button>
+              </div>
+              <p class="help-text">
+                Find a video without leaving the app. Selecting a result will fill in the YouTube URL field below, but you can
+                still paste any link manually.
+              </p>
+              <div
+                id="ytSearchFeedback"
+                class="yt-search-feedback"
+                role="status"
+                aria-live="polite"
+                hidden
+              ></div>
+              <div id="ytSearchResults" class="yt-search-results" hidden></div>
+            </div>
+          </div>
+
           <div class="form-group">
             <label for="yturl">YouTube URL</label>
             <input
