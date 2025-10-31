@@ -63,10 +63,38 @@ document.addEventListener('DOMContentLoaded', () => {
     ? document.body.dataset.debugMode === 'true'
     : false;
 
+  const CONSOLE_VISIBILITY_STORAGE_KEY = 'yt2radarr.consoleVisible';
+
+  function readConsoleVisibilityPreference(defaultValue = true) {
+    try {
+      const stored = window.localStorage.getItem(CONSOLE_VISIBILITY_STORAGE_KEY);
+      if (stored === 'true' || stored === 'false') {
+        return stored === 'true';
+      }
+    } catch (err) {
+      // Local storage may be unavailable (e.g., in private browsing mode)
+    }
+    return defaultValue;
+  }
+
+  function persistConsoleVisibility(value) {
+    try {
+      window.localStorage.setItem(
+        CONSOLE_VISIBILITY_STORAGE_KEY,
+        value ? 'true' : 'false'
+      );
+    } catch (err) {
+      // Ignore persistence errors
+    }
+  }
+
+  const initialConsoleVisible = readConsoleVisibilityPreference(true);
+
   const state = {
     downloads: [],
     pollers: new Map(),
     debugMode: initialDebugMode,
+    consoleVisible: initialConsoleVisible,
     lastLogs: [],
     copyFeedbackTimeout: null,
     selectedJobId: null,
@@ -123,6 +151,30 @@ document.addEventListener('DOMContentLoaded', () => {
       elements.copyButton.disabled = false;
     } else {
       elements.copyButton.setAttribute('hidden', 'hidden');
+    }
+  }
+
+  function setConsoleVisibility(enabled, options = {}) {
+    const { skipStorage = false } = options || {};
+    const value = Boolean(enabled);
+    state.consoleVisible = value;
+    if (document.body && document.body.dataset) {
+      document.body.dataset.consoleVisible = value ? 'true' : 'false';
+    }
+    if (elements.toggleConsoleButton) {
+      elements.toggleConsoleButton.textContent = value ? 'Hide Console' : 'Show Console';
+      elements.toggleConsoleButton.setAttribute('aria-expanded', value ? 'true' : 'false');
+      elements.toggleConsoleButton.setAttribute('aria-pressed', value ? 'true' : 'false');
+    }
+    if (elements.sideColumn) {
+      if (value) {
+        elements.sideColumn.removeAttribute('aria-hidden');
+      } else {
+        elements.sideColumn.setAttribute('aria-hidden', 'true');
+      }
+    }
+    if (!skipStorage) {
+      persistConsoleVisibility(value);
     }
   }
 
@@ -1295,6 +1347,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  if (elements.toggleConsoleButton) {
+    elements.toggleConsoleButton.addEventListener('click', () => {
+      setConsoleVisibility(!state.consoleVisible);
+    });
+  }
+
   elements.form.addEventListener('submit', async event => {
     event.preventDefault();
 
@@ -1374,6 +1432,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  setConsoleVisibility(initialConsoleVisible, { skipStorage: true });
   setDebugMode(initialDebugMode);
   updateExtraVisibility();
   renderDownloads();
