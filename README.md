@@ -103,9 +103,9 @@ Use the **Playlist Handling** menu on the main form to decide how yt2radarr shou
 
 * **Download only this video** – the default single-video workflow.
 * **Download entire playlist and merge into a single file** – stages every clip with `yt-dlp` and concatenates them via `ffmpeg`. This produces a single Radarr-ready movie file and requires `ffmpeg` to be available on the PATH.
-* **Download playlist and save each entry as an extra** – perfect for bonus content drops. Provide one extra type per playlist entry (Trailer, Behind the Scenes, Deleted, Featurette, Interview, Scene, Short, Other) and yt2radarr will fan the downloads out into the matching Radarr subfolders with descriptive filenames.
+* **Download playlist and save each entry as an extra** – perfect for bonus content drops. Click **Load Playlist Details** to preview every clip, assign a Radarr extra type (Trailer, Behind the Scenes, Deleted Scene, Featurette, Interview, Scene, Short, Other), and optionally name each entry before kicking off the job. yt2radarr stages the downloads and files every video into the matching Radarr subfolder with a descriptive filename.
 
-If you provide fewer extra types than playlist entries the remaining videos are stored using the last supplied type (falling back to **Other** when nothing matches). Every saved extra is logged so you can confirm the mapping from the UI console.
+yt2radarr remembers your selections when you reload the playlist. Any trailing videos without an explicit type inherit the last configured choice (falling back to **Other** when nothing matches), and the console log records every saved extra so you can verify the mapping from the UI.
 
 ## 🛠 Tips for portability
 

@@ -109,18 +109,40 @@
 
           <div id="playlistExtrasFields" style="display: none;">
             <div class="form-group">
-              <label for="playlistExtraTypes">Playlist Extra Types</label>
-              <textarea
-                id="playlistExtraTypes"
-                name="playlistExtraTypes"
-                rows="3"
-                placeholder="Trailer\nBehind the Scenes\nFeaturette"
-              ></textarea>
-              <p class="help-text">
-                Provide one extra type per line in playlist order. Supported types:
-                Trailer, Behind the Scenes, Deleted, Featurette, Interview, Scene,
-                Short, Other.
-              </p>
+              <label for="playlistFetchButton">Playlist Extras</label>
+              <div class="playlist-extras-wrapper">
+                <div class="playlist-actions">
+                  <button type="button" id="playlistFetchButton" class="button-primary">
+                    Load Playlist Details
+                  </button>
+                  <button
+                    type="button"
+                    id="playlistClearButton"
+                    class="button-secondary"
+                    hidden
+                  >
+                    Clear
+                  </button>
+                </div>
+                <p class="help-text">
+                  Load the playlist to review every video, choose an extra type, and
+                  assign a custom name for each entry. Supported types include Trailer,
+                  Behind the Scenes, Deleted Scene, Featurette, Interview, Scene, Short,
+                  and Other.
+                </p>
+                <div id="playlistPreviewPlaceholder" class="playlist-preview-empty">
+                  Enter a playlist URL and click <strong>Load Playlist Details</strong>
+                  to begin.
+                </div>
+                <div id="playlistPreview" class="playlist-preview" hidden>
+                  <div class="playlist-preview-header">
+                    <div id="playlistPreviewTitle" class="playlist-preview-title"></div>
+                    <div id="playlistPreviewMeta" class="playlist-preview-meta"></div>
+                  </div>
+                  <div id="playlistEntriesList" class="playlist-entries-list"></div>
+                </div>
+                <div id="playlistPreviewError" class="playlist-preview-error" hidden></div>
+              </div>
             </div>
           </div>
 

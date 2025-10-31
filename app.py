@@ -62,6 +62,22 @@ def _format_filesize(value: Optional[float]) -> str:
         unit_index += 1
     return f"{size:.1f} {units[unit_index]}"
 
+
+def _format_duration_label(value: Optional[float]) -> str:
+    """Return a human-readable timestamp label for seconds."""
+
+    try:
+        total_seconds = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if total_seconds <= 0:
+        return ""
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:d}:{seconds:02d}"
+
 def _default_config() -> Dict:
     return {
         "radarr_url": (os.environ.get("RADARR_URL") or "").rstrip("/"),
@@ -497,14 +513,25 @@ def _describe_job(payload: Dict) -> Dict:
         payload.get("playlist_mode")
         or ("merge" if merge_playlist else "single")
     ).strip().lower()
-    playlist_extra_types = [
-        value
-        for value in (
-            normalize_extra_type_key(entry)
-            for entry in payload.get("playlist_extra_types") or []
-        )
-        if value
+    playlist_extra_entries = [
+        entry
+        for entry in (payload.get("playlist_extra_entries") or [])
+        if isinstance(entry, dict)
     ]
+    playlist_extra_types = [
+        entry.get("type")
+        for entry in playlist_extra_entries
+        if normalize_extra_type_key(entry.get("type"))
+    ]
+    if not playlist_extra_types:
+        playlist_extra_types = [
+            value
+            for value in (
+                normalize_extra_type_key(entry)
+                for entry in payload.get("playlist_extra_types") or []
+            )
+            if value
+        ]
     if playlist_extra_types:
         extra = True
     extra_label = extra_name or EXTRA_TYPE_LABELS.get(extra_type, extra_type.capitalize())
@@ -527,6 +554,9 @@ def _describe_job(payload: Dict) -> Dict:
         )
         if readable_types:
             metadata.append(f"Playlist extras: {readable_types}")
+        entry_count = len(playlist_extra_entries) or len(playlist_extra_types)
+        if entry_count:
+            metadata.append(f"Playlist entries: {entry_count}")
     return {"label": label or "Radarr Download", "subtitle": subtitle, "metadata": metadata}
 
 
@@ -550,6 +580,167 @@ def _collect_playlist_extra_types(
     return collected
 
 
+def _collect_playlist_extra_entries(
+    raw_entries: Any, error: Callable[[str], None]
+) -> List[Dict[str, Any]]:
+    """Return normalised playlist extra descriptors from the request payload."""
+
+    if not isinstance(raw_entries, list):
+        return []
+
+    collected: List[Dict[str, Any]] = []
+    next_index = 1
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            continue
+        raw_index = raw_entry.get("index")
+        try:
+            index_value = int(raw_index)
+        except (TypeError, ValueError):
+            index_value = None
+        if index_value is None or index_value < 1:
+            index_value = next_index
+        next_index = index_value + 1
+
+        raw_type = raw_entry.get("type")
+        normalized_type = normalize_extra_type_key(raw_type)
+        if not normalized_type:
+            if str(raw_type or "").strip():
+                error(f"Unknown extra type '{raw_type}'.")
+            normalized_type = "other"
+
+        entry: Dict[str, Any] = {
+            "index": index_value,
+            "type": normalized_type,
+            "name": (raw_entry.get("name") or "").strip(),
+            "title": (raw_entry.get("title") or "").strip(),
+            "id": (raw_entry.get("id") or "").strip(),
+        }
+
+        raw_duration = raw_entry.get("duration")
+        try:
+            entry["duration"] = int(raw_duration)
+        except (TypeError, ValueError):
+            entry["duration"] = None
+
+        collected.append(entry)
+
+    collected.sort(key=lambda item: item.get("index") or 0)
+    for normalised_index, entry in enumerate(collected, start=1):
+        entry["index"] = normalised_index
+    return collected
+
+
+def _fetch_playlist_preview(
+    yt_url: str, cookie_path: Optional[str], limit: int
+) -> Dict[str, Any]:
+    """Query yt-dlp for playlist entries without downloading videos."""
+
+    limit = max(1, min(limit, 200))
+    command = [
+        "yt-dlp",
+        "--skip-download",
+        "--dump-single-json",
+        "--no-warnings",
+        "--playlist-end",
+        str(limit),
+    ]
+    if cookie_path:
+        command += ["--cookies", cookie_path]
+    command.append(yt_url)
+
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:  # pragma: no cover - runtime dependency missing
+        raise FileNotFoundError("yt-dlp executable not found.") from exc
+    except OSError as exc:  # pragma: no cover - subprocess failure
+        raise RuntimeError(f"Failed to invoke yt-dlp: {exc}") from exc
+
+    if result.returncode not in (0, None):
+        stderr = (result.stderr or "").strip() or "Unknown error"
+        raise RuntimeError(f"yt-dlp reported an error: {stderr}")
+
+    payload: Dict[str, Any]
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Failed to parse yt-dlp response.") from exc
+
+    entries: List[Dict[str, Any]] = []
+    playlist_title = ""
+    total_count = 0
+    truncated = False
+
+    if isinstance(payload, dict):
+        payload_type = payload.get("_type")
+        if payload_type == "playlist" and isinstance(payload.get("entries"), list):
+            raw_entries = payload.get("entries") or []
+            playlist_title = str(payload.get("title") or "").strip()
+            try:
+                total_count = int(payload.get("playlist_count") or len(raw_entries))
+            except (TypeError, ValueError):
+                total_count = len(raw_entries)
+        else:
+            raw_entries = [payload]
+            playlist_title = str(payload.get("title") or "").strip()
+            total_count = len(raw_entries)
+    else:
+        raw_entries = []
+
+    for idx, raw_entry in enumerate(raw_entries, start=1):
+        if not isinstance(raw_entry, dict):
+            continue
+        raw_index = raw_entry.get("playlist_index") or idx
+        try:
+            playlist_index = int(raw_index)
+        except (TypeError, ValueError):
+            playlist_index = idx
+
+        raw_duration = raw_entry.get("duration")
+        try:
+            duration_seconds = int(raw_duration)
+        except (TypeError, ValueError):
+            duration_seconds = None
+
+        duration_label = (
+            (raw_entry.get("duration_string") or "").strip()
+            or _format_duration_label(duration_seconds)
+        )
+
+        entry_title = (raw_entry.get("title") or "").strip()
+        if not entry_title:
+            entry_title = f"Entry {playlist_index}"
+
+        entries.append(
+            {
+                "index": playlist_index,
+                "title": entry_title,
+                "id": str(raw_entry.get("id") or ""),
+                "duration": duration_seconds,
+                "duration_text": duration_label,
+            }
+        )
+
+    entries.sort(key=lambda item: item.get("index") or 0)
+    for normalised_index, entry in enumerate(entries, start=1):
+        entry["index"] = normalised_index
+
+    if total_count and len(entries) < total_count:
+        truncated = True
+
+    return {
+        "entries": entries,
+        "playlist_title": playlist_title,
+        "total_count": total_count or len(entries),
+        "truncated": truncated,
+    }
+
+
 def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
     """Validate and sanitise the incoming create payload."""
 
@@ -568,9 +759,16 @@ def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
         error("Invalid playlist handling option selected.")
         playlist_mode = "single"
 
-    playlist_extra_types = _collect_playlist_extra_types(
-        data.get("playlist_extra_types"), error
+    playlist_extra_entries = _collect_playlist_extra_entries(
+        data.get("playlist_extra_entries"), error
     )
+    playlist_extra_types = [
+        entry.get("type") for entry in playlist_extra_entries if entry.get("type")
+    ]
+    if not playlist_extra_types:
+        playlist_extra_types = _collect_playlist_extra_types(
+            data.get("playlist_extra_types"), error
+        )
 
     extra_requested = bool(data.get("extra"))
     extra_name = (data.get("extra_name") or "").strip()
@@ -579,7 +777,7 @@ def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
     if playlist_mode == "extras":
         if not extra_requested:
             error("Playlist extras require storing the videos as extras.")
-        if not playlist_extra_types:
+        if not playlist_extra_types and not playlist_extra_entries:
             error("Provide at least one extra type for the playlist entries.")
         extra_requested = True
     elif extra_requested and not extra_name:
@@ -602,6 +800,7 @@ def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
         "merge_playlist": playlist_mode == "merge",
         "playlist_mode": playlist_mode,
         "playlist_extra_types": playlist_extra_types,
+        "playlist_extra_entries": playlist_extra_entries,
     }
 
 
@@ -616,6 +815,40 @@ def index():
         configured=is_configured(config),
         debug_mode=config.get("debug_mode", False),
     )
+
+
+@app.route("/playlist_preview", methods=["POST"])
+def playlist_preview():
+    """Return playlist details for the provided YouTube URL."""
+
+    config = load_config()
+    data = request.get_json(silent=True) or {}
+    yt_url = (data.get("yturl") or data.get("url") or "").strip()
+    if not yt_url:
+        return jsonify({"error": "YouTube URL is required."}), 400
+    if not re.search(r"(youtube\.com|youtu\.be)/", yt_url, re.IGNORECASE):
+        return jsonify({"error": "Please provide a valid YouTube URL."}), 400
+
+    limit_raw = data.get("limit")
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, 200))
+
+    cookie_path = get_cookie_path(config)
+    try:
+        preview = _fetch_playlist_preview(yt_url, cookie_path, limit)
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 500
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    preview["limit"] = limit
+    preview["debug_mode"] = config.get("debug_mode", False)
+    return jsonify(preview)
+
+
 @app.route("/create", methods=["POST"])
 def create():
     """Create a new download job from the submitted request payload."""
@@ -701,19 +934,61 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             payload.get("playlist_mode")
             or ("merge" if merge_playlist else "single")
         ).strip().lower()
-        raw_playlist_extra_types = payload.get("playlist_extra_types") or []
-        playlist_extra_types: List[str] = []
-        for entry in raw_playlist_extra_types:
-            normalized = normalize_extra_type_key(entry)
-            if normalized:
-                playlist_extra_types.append(normalized)
+        raw_playlist_extra_entries = payload.get("playlist_extra_entries") or []
+        playlist_extra_entries: List[Dict[str, Any]] = []
+        for raw_entry in raw_playlist_extra_entries:
+            if not isinstance(raw_entry, dict):
+                continue
+            raw_index = raw_entry.get("index")
+            try:
+                index_value = int(raw_index)
+            except (TypeError, ValueError):
+                index_value = len(playlist_extra_entries) + 1
+
+            normalized_type = normalize_extra_type_key(raw_entry.get("type")) or "other"
+            normalised_entry: Dict[str, Any] = {
+                "index": index_value,
+                "type": normalized_type,
+                "name": (raw_entry.get("name") or "").strip(),
+                "title": (raw_entry.get("title") or "").strip(),
+            }
+
+            raw_duration = raw_entry.get("duration")
+            if isinstance(raw_duration, (int, float)):
+                normalised_entry["duration"] = int(raw_duration)
+            elif raw_duration is not None:
+                normalised_entry["duration"] = None
+
+            identifier = (raw_entry.get("id") or "").strip()
+            if identifier:
+                normalised_entry["id"] = identifier
+
+            playlist_extra_entries.append(normalised_entry)
+
+        playlist_extra_entries.sort(key=lambda item: item.get("index") or 0)
+        for normalised_index, entry in enumerate(playlist_extra_entries, start=1):
+            entry["index"] = normalised_index
+
+        playlist_extra_types: List[str] = [
+            entry.get("type")
+            for entry in playlist_extra_entries
+            if entry.get("type")
+        ]
+        if not playlist_extra_types:
+            raw_playlist_extra_types = payload.get("playlist_extra_types") or []
+            for entry in raw_playlist_extra_types:
+                normalized = normalize_extra_type_key(entry)
+                if normalized:
+                    playlist_extra_types.append(normalized)
         if playlist_mode == "extras" and not playlist_extra_types:
             warn("Playlist extras mode selected but no valid extra types were provided.")
         if playlist_mode != "extras":
             playlist_extra_types = []
+            playlist_extra_entries = []
         merge_playlist = playlist_mode == "merge"
         payload["playlist_mode"] = playlist_mode
         payload["playlist_extra_types"] = playlist_extra_types
+        payload["playlist_extra_entries"] = playlist_extra_entries
         payload["merge_playlist"] = merge_playlist
 
         resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
@@ -751,7 +1026,9 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             },
         )
 
-        extra = bool(payload.get("extra")) or bool(playlist_extra_types)
+        extra = bool(payload.get("extra")) or bool(playlist_extra_types) or bool(
+            playlist_extra_entries
+        )
         extra_name = (payload.get("extra_name") or "").strip()
         try:
             log(f"Fetching Radarr details for movie ID {movie_id}.")
@@ -1308,14 +1585,17 @@ def process_download_job(job_id: str, payload: Dict) -> None:
 
             active_candidates.sort()
 
-            fallback_type = (
-                playlist_extra_types[-1]
-                if playlist_extra_types
-                else extra_type
-            )
+            fallback_type = extra_type
+            if playlist_extra_entries:
+                last_type = playlist_extra_entries[-1].get("type")
+                if last_type:
+                    fallback_type = last_type
+            elif playlist_extra_types:
+                fallback_type = playlist_extra_types[-1]
             if fallback_type not in allowed_extra_types:
                 fallback_type = "other"
-            provided_count = len(playlist_extra_types)
+
+            provided_count = len(playlist_extra_entries) or len(playlist_extra_types)
             if provided_count and len(active_candidates) > provided_count:
                 fallback_label = EXTRA_TYPE_LABELS.get(
                     fallback_type, fallback_type.capitalize()
@@ -1323,39 +1603,54 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                 warn(
                     "Playlist contained "
                     f"{len(active_candidates)} entries but only {provided_count} "
-                    "extra types were supplied. Remaining entries will use "
+                    "extra descriptors were supplied. Remaining entries will use "
                     f"'{fallback_label}'."
                 )
 
             saved_paths: List[str] = []
 
             for entry_index, candidate in enumerate(active_candidates, start=1):
-                assigned_type = (
-                    playlist_extra_types[entry_index - 1]
-                    if entry_index - 1 < provided_count
-                    else fallback_type
-                )
+                entry_details: Optional[Dict[str, Any]] = None
+                if entry_index - 1 < len(playlist_extra_entries):
+                    entry_details = playlist_extra_entries[entry_index - 1]
+
+                assigned_type = None
+                if entry_details and entry_details.get("type") in allowed_extra_types:
+                    assigned_type = entry_details.get("type")
+                elif entry_index - 1 < len(playlist_extra_types):
+                    assigned_type = playlist_extra_types[entry_index - 1]
+                if not assigned_type:
+                    assigned_type = fallback_type
                 if assigned_type not in allowed_extra_types:
                     assigned_type = "other"
-                label = EXTRA_TYPE_LABELS.get(
-                    assigned_type, assigned_type.capitalize()
-                )
+
+                label = EXTRA_TYPE_LABELS.get(assigned_type, assigned_type.capitalize())
                 dest_subfolder = folder_map.get(
                     assigned_type, assigned_type.capitalize() + "s"
                 )
                 dest_dir = os.path.join(movie_path, dest_subfolder)
                 os.makedirs(dest_dir, exist_ok=True)
 
-                entry_title = os.path.splitext(os.path.basename(candidate))[0]
+                entry_title = ""
+                if entry_details and entry_details.get("title"):
+                    entry_title = str(entry_details.get("title")).strip()
+                if not entry_title:
+                    entry_title = os.path.splitext(os.path.basename(candidate))[0]
                 sanitized_entry_title = sanitize_filename(entry_title)
                 base_label = sanitize_filename(label) or assigned_type
-                canonical_stem = " ".join(
-                    part for part in [movie_stem, base_label] if part
-                ).strip()
-                if sanitized_entry_title:
-                    lowered_stem = canonical_stem.lower()
+                custom_name = ""
+                if entry_details and entry_details.get("name"):
+                    custom_name = str(entry_details.get("name")).strip()
+                sanitized_custom = sanitize_filename(custom_name)
+
+                canonical_parts = [part for part in [movie_stem, base_label] if part]
+                if sanitized_custom:
+                    canonical_parts.append(sanitized_custom)
+                elif sanitized_entry_title:
+                    lowered_stem = " ".join(canonical_parts).lower()
                     if sanitized_entry_title.lower() not in lowered_stem:
-                        canonical_stem = f"{canonical_stem} - {sanitized_entry_title}".strip()
+                        canonical_parts.append(sanitized_entry_title)
+                canonical_stem = " ".join(canonical_parts).strip()
                 canonical_stem = canonical_stem or f"{movie_stem} {base_label}".strip()
                 canonical_stem = sanitize_filename(canonical_stem) or (
                     f"{movie_stem} {base_label}".strip() or movie_stem
@@ -1384,8 +1679,13 @@ def process_download_job(job_id: str, payload: Dict) -> None:
                     return
 
                 saved_paths.append(dest_path)
+                display_label = label
+                if custom_name:
+                    display_label = f"{label} – {custom_name}".strip()
+                elif entry_title and entry_title.lower() not in label.lower():
+                    display_label = f"{label} – {entry_title}".strip()
                 log(
-                    f"Saving playlist extra #{index}: '{label}' -> "
+                    f"Saving playlist extra #{entry_index}: '{display_label}' -> "
                     f"'{dest_filename}'."
                 )
 
