@@ -469,6 +469,27 @@ button[type="submit"]:disabled {
   gap: 8px;
 }
 
+.download-item.is-interactive {
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.download-item.is-interactive:focus {
+  outline: none;
+}
+
+.download-item.is-interactive:focus-visible,
+.download-item.is-interactive:hover {
+  border-color: #2f81f7;
+  box-shadow: 0 0 0 1px rgba(47, 129, 247, 0.35);
+}
+
+.download-item.is-selected {
+  border-color: #2f81f7;
+  box-shadow: 0 0 0 1px rgba(47, 129, 247, 0.45);
+  background: #262b38;
+}
+
 .download-item .item-header {
   display: flex;
   flex-direction: column;
