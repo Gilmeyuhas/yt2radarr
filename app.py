@@ -5,6 +5,7 @@
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -651,11 +652,25 @@ def _collect_playlist_extra_entries(
 
 
 def _fetch_playlist_preview(
-    yt_url: str, cookie_path: Optional[str], limit: int
+    yt_url: str,
+    cookie_path: Optional[str],
+    limit: int,
+    debug: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """Query yt-dlp for playlist entries without downloading videos."""
 
-    limit = max(1, min(limit, 200))
+    def trace(message: str) -> None:
+        if debug:
+            debug(message)
+
+    trace(f"Preparing playlist preview for '{yt_url}' (raw limit={limit}).")
+    clamped_limit = max(1, min(limit, 200))
+    limit_int = int(clamped_limit)
+    if limit_int != limit:
+        trace(f"Normalised playlist entry limit to {limit_int}.")
+    else:
+        trace(f"Playlist entry limit set to {limit_int}.")
+    limit = limit_int
     command = [
         "yt-dlp",
         "--ignore-config",
@@ -667,8 +682,14 @@ def _fetch_playlist_preview(
         str(limit),
     ]
     if cookie_path:
+        trace(f"Using cookie jar at '{cookie_path}'.")
         command += ["--cookies", cookie_path]
+    else:
+        trace("No cookie jar configured for playlist preview.")
     command.append(yt_url)
+
+    quoted_command = " ".join(shlex.quote(part) for part in command)
+    trace(f"Executing command: {quoted_command}")
 
     try:
         result = subprocess.run(
@@ -680,25 +701,38 @@ def _fetch_playlist_preview(
             check=False,
         )
     except FileNotFoundError as exc:  # pragma: no cover - runtime dependency missing
+        trace("yt-dlp executable not found when probing playlist preview.")
         raise FileNotFoundError("yt-dlp executable not found.") from exc
     except OSError as exc:  # pragma: no cover - subprocess failure
+        trace(f"Failed to invoke yt-dlp: {exc}")
         raise RuntimeError(f"Failed to invoke yt-dlp: {exc}") from exc
 
     if result.returncode not in (0, None):
         stderr = (result.stderr or "").strip() or "Unknown error"
+        stderr_summary = stderr.splitlines()[0] if stderr else "no stderr"
+        trace(
+            "yt-dlp returned non-zero exit code "
+            f"{result.returncode}: {stderr_summary}"
+        )
         raise RuntimeError(f"yt-dlp reported an error: {stderr}")
 
     payload: Dict[str, Any]
     stdout_text = result.stdout or ""
+    trace(f"yt-dlp stdout captured ({len(stdout_text)} bytes).")
     try:
         payload = json.loads(stdout_text or "{}")
+        trace("Parsed yt-dlp JSON response from primary stdout payload.")
     except json.JSONDecodeError:
+        trace("Primary stdout was not valid JSON; scanning for JSON block.")
         json_block = _extract_first_json_block(stdout_text)
         if not json_block:
+            trace("No JSON block could be extracted from yt-dlp stdout.")
             raise RuntimeError("Failed to parse yt-dlp response.")
         try:
             payload = json.loads(json_block)
+            trace("Parsed yt-dlp JSON response from extracted block.")
         except json.JSONDecodeError as exc:
+            trace(f"JSON parsing failed after extraction: {exc}")
             raise RuntimeError("Failed to parse yt-dlp response.") from exc
 
     entries: List[Dict[str, Any]] = []
@@ -708,6 +742,7 @@ def _fetch_playlist_preview(
 
     if isinstance(payload, dict):
         payload_type = payload.get("_type")
+        trace(f"Parsed payload type: {payload_type or 'video'}.")
         if payload_type == "playlist" and isinstance(payload.get("entries"), list):
             raw_entries = payload.get("entries") or []
             playlist_title = str(payload.get("title") or "").strip()
@@ -715,27 +750,42 @@ def _fetch_playlist_preview(
                 total_count = int(payload.get("playlist_count") or len(raw_entries))
             except (TypeError, ValueError):
                 total_count = len(raw_entries)
+            trace(
+                "Playlist payload contains "
+                f"{len(raw_entries)} entries (reported total {total_count})."
+            )
         else:
             raw_entries = [payload]
             playlist_title = str(payload.get("title") or "").strip()
             total_count = len(raw_entries)
+            trace("Single video payload treated as playlist with one entry.")
     else:
         raw_entries = []
+        trace("Unexpected payload structure: not a dictionary; no entries extracted.")
 
     for idx, raw_entry in enumerate(raw_entries, start=1):
         if not isinstance(raw_entry, dict):
+            trace(f"Skipping non-dictionary entry at position {idx}.")
             continue
         raw_index = raw_entry.get("playlist_index") or idx
         try:
             playlist_index = int(raw_index)
         except (TypeError, ValueError):
             playlist_index = idx
+            trace(
+                f"Entry {idx} had invalid playlist_index '{raw_index}'; using sequential index."
+            )
 
         raw_duration = raw_entry.get("duration")
         try:
             duration_seconds = int(raw_duration)
         except (TypeError, ValueError):
             duration_seconds = None
+            if raw_duration not in (None, ""):
+                trace(
+                    f"Entry {idx} duration '{raw_duration}' could not be parsed; "
+                    "stored as unknown."
+                )
 
         duration_string = raw_entry.get("duration_string")
         if isinstance(duration_string, str):
@@ -757,22 +807,40 @@ def _fetch_playlist_preview(
         if not entry_title:
             entry_title = f"Entry {playlist_index}"
 
+        entry_id = str(raw_entry.get("id") or "")
         entries.append(
             {
                 "index": playlist_index,
                 "title": entry_title,
-                "id": str(raw_entry.get("id") or ""),
+                "id": entry_id,
                 "duration": duration_seconds,
                 "duration_text": duration_label,
             }
+        )
+        trace(
+            "Collected entry "
+            f"{playlist_index}: title='{entry_title}', id='{entry_id}', "
+            f"duration={duration_seconds}, duration_text='{duration_label}'."
         )
 
     entries.sort(key=lambda item: item.get("index") or 0)
     for normalised_index, entry in enumerate(entries, start=1):
         entry["index"] = normalised_index
+        trace(
+            f"Normalised entry position {entry['index']}: title='{entry['title']}'."
+        )
 
     if total_count and len(entries) < total_count:
         truncated = True
+        trace(
+            "Playlist truncated: received "
+            f"{len(entries)} entries out of reported {total_count}."
+        )
+    else:
+        trace(
+            "Playlist processed with "
+            f"{len(entries)} entries (reported total {total_count or len(entries)})."
+        )
 
     return {
         "entries": entries,
@@ -914,18 +982,53 @@ def playlist_preview():
         limit = 50
     limit = max(1, min(limit, 200))
 
+    debug_messages: List[str] = []
+    debug_callback: Optional[Callable[[str], None]] = None
+    if config.get("debug_mode"):
+        def preview_debug(message: str) -> None:
+            formatted = f"[playlist_preview] {message}"
+            print(formatted, flush=True)
+            debug_messages.append(formatted)
+
+        debug_callback = preview_debug
+        debug_callback(
+            "Verbose playlist preview logging enabled; preparing request validation."
+        )
+
+    if debug_callback:
+        debug_callback(
+            "Playlist preview payload received: "
+            f"limit parameter={limit_raw!r}, effective limit={limit}."
+        )
+
     cookie_path = get_cookie_path(config)
     try:
-        preview = _fetch_playlist_preview(yt_url, cookie_path, limit)
+        preview = _fetch_playlist_preview(yt_url, cookie_path, limit, debug=debug_callback)
     except FileNotFoundError as exc:
-        return jsonify({"error": str(exc)}), 500
+        if debug_callback:
+            debug_callback(f"Playlist preview failed: {exc}")
+        return jsonify({"error": str(exc), "debug_messages": debug_messages}), 500
     except RuntimeError as exc:
-        return jsonify({"error": str(exc)}), 502
+        if debug_callback:
+            debug_callback(f"Playlist preview failed: {exc}")
+        return jsonify({"error": str(exc), "debug_messages": debug_messages}), 502
     except Exception as exc:  # pragma: no cover - unexpected failure
-        return jsonify({"error": f"Unexpected playlist probe error: {exc}"}), 500
+        if debug_callback:
+            debug_callback(f"Unexpected playlist probe error: {exc}")
+        return (
+            jsonify(
+                {
+                    "error": f"Unexpected playlist probe error: {exc}",
+                    "debug_messages": debug_messages,
+                }
+            ),
+            500,
+        )
 
     preview["limit"] = limit
     preview["debug_mode"] = config.get("debug_mode", False)
+    if debug_messages:
+        preview["debug_messages"] = debug_messages
     return jsonify(preview)
 
 
