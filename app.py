@@ -612,9 +612,9 @@ def _collect_playlist_extra_entries(
         entry: Dict[str, Any] = {
             "index": index_value,
             "type": normalized_type,
-            "name": (raw_entry.get("name") or "").strip(),
-            "title": (raw_entry.get("title") or "").strip(),
-            "id": (raw_entry.get("id") or "").strip(),
+            "name": str(raw_entry.get("name") or "").strip(),
+            "title": str(raw_entry.get("title") or "").strip(),
+            "id": str(raw_entry.get("id") or "").strip(),
         }
 
         raw_duration = raw_entry.get("duration")
@@ -707,12 +707,23 @@ def _fetch_playlist_preview(
         except (TypeError, ValueError):
             duration_seconds = None
 
-        duration_label = (
-            (raw_entry.get("duration_string") or "").strip()
-            or _format_duration_label(duration_seconds)
-        )
+        duration_string = raw_entry.get("duration_string")
+        if isinstance(duration_string, str):
+            duration_label = duration_string.strip()
+        elif duration_string is None:
+            duration_label = ""
+        else:
+            duration_label = str(duration_string).strip()
+        if not duration_label:
+            duration_label = _format_duration_label(duration_seconds)
 
-        entry_title = (raw_entry.get("title") or "").strip()
+        raw_title_value = raw_entry.get("title")
+        if isinstance(raw_title_value, str):
+            entry_title = raw_title_value.strip()
+        elif raw_title_value is None:
+            entry_title = ""
+        else:
+            entry_title = str(raw_title_value).strip()
         if not entry_title:
             entry_title = f"Entry {playlist_index}"
 
@@ -986,8 +997,8 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             normalised_entry: Dict[str, Any] = {
                 "index": index_value,
                 "type": normalized_type,
-                "name": (raw_entry.get("name") or "").strip(),
-                "title": (raw_entry.get("title") or "").strip(),
+                "name": str(raw_entry.get("name") or "").strip(),
+                "title": str(raw_entry.get("title") or "").strip(),
             }
 
             raw_duration = raw_entry.get("duration")
@@ -996,7 +1007,7 @@ def process_download_job(job_id: str, payload: Dict) -> None:
             elif raw_duration is not None:
                 normalised_entry["duration"] = None
 
-            identifier = (raw_entry.get("id") or "").strip()
+            identifier = str(raw_entry.get("id") or "").strip()
             if identifier:
                 normalised_entry["id"] = identifier
 
