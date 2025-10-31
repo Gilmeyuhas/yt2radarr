@@ -741,18 +741,30 @@ def _fetch_playlist_preview(
     }
 
 
-def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
-    """Validate and sanitise the incoming create payload."""
+def _validate_request_urls(data: Dict, error: Callable[[str], None]) -> str:
+    """Return the validated YouTube URL from the request payload."""
 
     yt_url = (data.get("yturl") or "").strip()
     if not yt_url:
         error("YouTube URL is required.")
     elif not re.search(r"(youtube\.com|youtu\.be)/", yt_url):
         error("Please provide a valid YouTube URL.")
+    return yt_url
+
+
+def _validate_movie_selection(data: Dict, error: Callable[[str], None]) -> str:
+    """Ensure a movie has been chosen from the suggestions list."""
 
     movie_id = (data.get("movieId") or "").strip()
     if not movie_id:
         error("No movie selected. Please choose a movie from the suggestions list.")
+    return movie_id
+
+
+def _resolve_playlist_request(
+    data: Dict, error: Callable[[str], None]
+) -> Tuple[str, List[Dict[str, Any]], List[str]]:
+    """Return playlist mode, entries, and extra types from the payload."""
 
     playlist_mode = (data.get("playlist_mode") or "single").strip().lower()
     if playlist_mode not in ALLOWED_PLAYLIST_MODES:
@@ -770,10 +782,21 @@ def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
             data.get("playlist_extra_types"), error
         )
 
-    extra_requested = bool(data.get("extra"))
+    return playlist_mode, playlist_extra_entries, playlist_extra_types
+
+
+def _resolve_extra_settings(
+    data: Dict,
+    playlist_mode: str,
+    playlist_extra_entries: List[Dict[str, Any]],
+    playlist_extra_types: List[str],
+    error: Callable[[str], None],
+) -> Tuple[bool, str, str]:
+    """Determine the extra storage options for the request."""
+
+    extra_requested = bool(data.get("extra")) or bool(playlist_extra_types)
     extra_name = (data.get("extra_name") or "").strip()
-    if playlist_extra_types:
-        extra_requested = True
+
     if playlist_mode == "extras":
         if not extra_requested:
             error("Playlist extras require storing the videos as extras.")
@@ -787,9 +810,23 @@ def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
     if playlist_mode == "extras" and playlist_extra_types:
         selected_extra_type = playlist_extra_types[0]
 
+    return extra_requested, extra_name, selected_extra_type
+
+
+def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
+    """Validate and sanitise the incoming create payload."""
+
+    playlist_mode, playlist_extra_entries, playlist_extra_types = _resolve_playlist_request(
+        data, error
+    )
+
+    extra_requested, extra_name, selected_extra_type = _resolve_extra_settings(
+        data, playlist_mode, playlist_extra_entries, playlist_extra_types, error
+    )
+
     return {
-        "yturl": yt_url,
-        "movieId": movie_id,
+        "yturl": _validate_request_urls(data, error),
+        "movieId": _validate_movie_selection(data, error),
         "movieName": (data.get("movieName") or "").strip(),
         "title": (data.get("title") or "").strip(),
         "year": (data.get("year") or "").strip(),
