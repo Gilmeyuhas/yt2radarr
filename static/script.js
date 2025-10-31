@@ -10,18 +10,9 @@ document.addEventListener('DOMContentLoaded', () => {
     tmdbInput: document.getElementById('tmdb'),
     extraCheckbox: document.getElementById('extra'),
     playlistModeSelect: document.getElementById('playlistMode'),
-    playlistExtrasFields: document.getElementById('playlistExtrasFields'),
     extraTypeSelect: document.getElementById('extraType'),
     extraFields: document.getElementById('extraFields'),
     extraNameInput: document.getElementById('extra_name'),
-    playlistFetchButton: document.getElementById('playlistFetchButton'),
-    playlistClearButton: document.getElementById('playlistClearButton'),
-    playlistPreview: document.getElementById('playlistPreview'),
-    playlistPreviewTitle: document.getElementById('playlistPreviewTitle'),
-    playlistPreviewMeta: document.getElementById('playlistPreviewMeta'),
-    playlistEntriesList: document.getElementById('playlistEntriesList'),
-    playlistPreviewPlaceholder: document.getElementById('playlistPreviewPlaceholder'),
-    playlistPreviewError: document.getElementById('playlistPreviewError'),
     consoleDiv: document.getElementById('console'),
     downloadsList: document.getElementById('downloadsList'),
     copyButton: document.getElementById('copyLogButton')
@@ -61,15 +52,7 @@ document.addEventListener('DOMContentLoaded', () => {
     pollers: new Map(),
     debugMode: initialDebugMode,
     lastLogs: [],
-    copyFeedbackTimeout: null,
-    playlistEntries: [],
-    playlistTitle: '',
-    playlistTotalCount: 0,
-    playlistTruncated: false,
-    playlistLoading: false,
-    playlistPlaceholderText: elements.playlistPreviewPlaceholder
-      ? elements.playlistPreviewPlaceholder.textContent
-      : ''
+    copyFeedbackTimeout: null
   };
 
   const IMPORTANT_LINE_SNIPPETS = [
@@ -79,8 +62,7 @@ document.addEventListener('DOMContentLoaded', () => {
     'storing video in subfolder',
     'created movie folder',
     'fetching radarr details',
-    'resolved youtube format',
-    'saving playlist extra'
+    'resolved youtube format'
   ];
 
   const NOISY_WARNING_SNIPPETS = [
@@ -124,305 +106,6 @@ document.addEventListener('DOMContentLoaded', () => {
     updateCopyButtonVisibility();
     if (changed && state.lastLogs && state.lastLogs.length) {
       renderLogLines(state.lastLogs);
-    }
-  }
-
-  function setPlaylistLoading(isLoading) {
-    state.playlistLoading = Boolean(isLoading);
-    if (elements.playlistFetchButton) {
-      elements.playlistFetchButton.disabled = state.playlistLoading;
-      const hasEntries = state.playlistEntries && state.playlistEntries.length > 0;
-      if (state.playlistLoading) {
-        elements.playlistFetchButton.textContent = 'Loading…';
-      } else {
-        elements.playlistFetchButton.textContent = hasEntries
-          ? 'Reload Playlist'
-          : 'Load Playlist Details';
-      }
-    }
-  }
-
-  function clearPlaylistEntries({ keepPlaceholder = false } = {}) {
-    state.playlistEntries = [];
-    state.playlistTitle = '';
-    state.playlistTotalCount = 0;
-    state.playlistTruncated = false;
-    state.playlistLoading = false;
-    if (elements.playlistEntriesList) {
-      elements.playlistEntriesList.innerHTML = '';
-    }
-    if (elements.playlistPreviewTitle) {
-      elements.playlistPreviewTitle.textContent = '';
-    }
-    if (elements.playlistPreviewMeta) {
-      elements.playlistPreviewMeta.textContent = '';
-    }
-    if (elements.playlistPreviewError) {
-      elements.playlistPreviewError.textContent = '';
-      elements.playlistPreviewError.setAttribute('hidden', 'hidden');
-    }
-    if (elements.playlistPreview) {
-      elements.playlistPreview.setAttribute('hidden', 'hidden');
-    }
-    if (elements.playlistPreviewPlaceholder) {
-      if (!keepPlaceholder && state.playlistPlaceholderText) {
-        elements.playlistPreviewPlaceholder.textContent = state.playlistPlaceholderText;
-      }
-      elements.playlistPreviewPlaceholder.removeAttribute('hidden');
-    }
-    if (elements.playlistClearButton) {
-      elements.playlistClearButton.setAttribute('hidden', 'hidden');
-    }
-    setPlaylistLoading(false);
-  }
-
-  function renderPlaylistEntries() {
-    const hasEntries = state.playlistEntries && state.playlistEntries.length > 0;
-    if (elements.playlistPreviewPlaceholder) {
-      if (hasEntries) {
-        elements.playlistPreviewPlaceholder.setAttribute('hidden', 'hidden');
-      } else if (!state.playlistLoading) {
-        elements.playlistPreviewPlaceholder.removeAttribute('hidden');
-      }
-    }
-    if (elements.playlistPreview) {
-      if (hasEntries) {
-        elements.playlistPreview.removeAttribute('hidden');
-      } else {
-        elements.playlistPreview.setAttribute('hidden', 'hidden');
-      }
-    }
-    if (elements.playlistClearButton) {
-      if (hasEntries) {
-        elements.playlistClearButton.removeAttribute('hidden');
-      } else {
-        elements.playlistClearButton.setAttribute('hidden', 'hidden');
-      }
-    }
-
-    if (elements.playlistPreviewTitle) {
-      elements.playlistPreviewTitle.textContent = state.playlistTitle || '';
-    }
-
-    if (elements.playlistPreviewMeta) {
-      const entryCount = state.playlistEntries.length;
-      const totalCount = state.playlistTotalCount || entryCount;
-      if (hasEntries) {
-        let summary = `${entryCount} video${entryCount === 1 ? '' : 's'}`;
-        if (state.playlistTruncated && totalCount > entryCount) {
-          summary = `${entryCount} of ${totalCount} videos`;
-        }
-        elements.playlistPreviewMeta.textContent = summary;
-      } else {
-        elements.playlistPreviewMeta.textContent = '';
-      }
-    }
-
-    if (!elements.playlistEntriesList) {
-      return;
-    }
-
-    elements.playlistEntriesList.innerHTML = '';
-    if (!hasEntries) {
-      return;
-    }
-
-    const fragment = document.createDocumentFragment();
-    state.playlistEntries.forEach(entry => {
-      const row = document.createElement('div');
-      row.classList.add('playlist-entry-row');
-      row.dataset.entryIndex = String(entry.index);
-
-      const infoColumn = document.createElement('div');
-      infoColumn.classList.add('playlist-entry-info');
-      const indexBadge = document.createElement('div');
-      indexBadge.classList.add('playlist-entry-index');
-      indexBadge.textContent = `#${String(entry.index).padStart(2, '0')}`;
-      const titleLine = document.createElement('div');
-      titleLine.classList.add('playlist-entry-title');
-      titleLine.textContent = entry.title || `Entry ${entry.index}`;
-      if (entry.duration_text) {
-        const duration = document.createElement('span');
-        duration.classList.add('playlist-entry-duration');
-        duration.textContent = entry.duration_text;
-        titleLine.appendChild(duration);
-      }
-      infoColumn.appendChild(indexBadge);
-      infoColumn.appendChild(titleLine);
-
-      const controlsColumn = document.createElement('div');
-      controlsColumn.classList.add('playlist-entry-controls');
-      const typeSelect = document.createElement('select');
-      typeSelect.classList.add('playlist-entry-type');
-      typeSelect.dataset.entryIndex = String(entry.index);
-      Object.entries(EXTRA_TYPE_LABELS).forEach(([value, label]) => {
-        const option = document.createElement('option');
-        option.value = value;
-        option.textContent = label;
-        typeSelect.appendChild(option);
-      });
-      if (entry.type && EXTRA_TYPE_LABELS[entry.type]) {
-        typeSelect.value = entry.type;
-      }
-      typeSelect.addEventListener('change', event => {
-        const indexValue = parseInt(event.target.dataset.entryIndex, 10);
-        const selected = event.target.value;
-        if (Number.isFinite(indexValue)) {
-          const targetEntry = state.playlistEntries.find(item => item.index === indexValue);
-          if (targetEntry) {
-            targetEntry.type = selected;
-          }
-        }
-      });
-
-      const nameInput = document.createElement('input');
-      nameInput.type = 'text';
-      nameInput.placeholder = 'Custom name (optional)';
-      nameInput.classList.add('playlist-entry-name');
-      nameInput.dataset.entryIndex = String(entry.index);
-      nameInput.value = entry.name || '';
-      nameInput.addEventListener('input', event => {
-        const indexValue = parseInt(event.target.dataset.entryIndex, 10);
-        if (Number.isFinite(indexValue)) {
-          const targetEntry = state.playlistEntries.find(item => item.index === indexValue);
-          if (targetEntry) {
-            targetEntry.name = event.target.value;
-          }
-        }
-      });
-
-      controlsColumn.appendChild(typeSelect);
-      controlsColumn.appendChild(nameInput);
-
-      row.appendChild(infoColumn);
-      row.appendChild(controlsColumn);
-      fragment.appendChild(row);
-    });
-
-    elements.playlistEntriesList.appendChild(fragment);
-  }
-
-  function showPlaylistError(message) {
-    if (!elements.playlistPreviewError) {
-      return;
-    }
-    const text = typeof message === 'string' ? message.trim() : '';
-    elements.playlistPreviewError.textContent = text || 'Failed to load playlist details.';
-    elements.playlistPreviewError.removeAttribute('hidden');
-  }
-
-  function hidePlaylistError() {
-    if (elements.playlistPreviewError) {
-      elements.playlistPreviewError.textContent = '';
-      elements.playlistPreviewError.setAttribute('hidden', 'hidden');
-    }
-  }
-
-  async function fetchPlaylistPreview() {
-    if (!elements.playlistModeSelect || elements.playlistModeSelect.value !== 'extras') {
-      updatePlaylistControls();
-      return;
-    }
-
-    const url = elements.ytInput ? elements.ytInput.value.trim() : '';
-    if (!url) {
-      const message = 'Enter a YouTube playlist URL to load entries.';
-      appendConsoleLine(`ERROR: ${message}`, 'error');
-      showPlaylistError(message);
-      return;
-    }
-
-    setPlaylistLoading(true);
-    hidePlaylistError();
-
-    try {
-      const response = await fetch('/playlist_preview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ yturl: url })
-      });
-      const data = await response.json().catch(() => ({}));
-      if (typeof data.debug_mode === 'boolean') {
-        setDebugMode(data.debug_mode);
-      }
-
-      if (!response.ok) {
-        const errorMessage = (data && data.error ? data.error : `HTTP ${response.status}`).trim();
-        showPlaylistError(errorMessage);
-        clearPlaylistEntries({ keepPlaceholder: true });
-        appendConsoleLine(`ERROR: ${errorMessage}`, 'error');
-        return;
-      }
-
-      const rawEntries = Array.isArray(data.entries) ? data.entries : [];
-      const totalCount = typeof data.total_count === 'number' ? data.total_count : rawEntries.length;
-      const truncated = Boolean(data.truncated) && totalCount > rawEntries.length;
-      const playlistTitle = typeof data.playlist_title === 'string' ? data.playlist_title.trim() : '';
-
-      const previousEntries = new Map();
-      state.playlistEntries.forEach(entry => {
-        const key = (entry.id || '').toLowerCase() || (entry.title || '').toLowerCase();
-        if (!previousEntries.has(key)) {
-          previousEntries.set(key, entry);
-        }
-      });
-
-      const normalisedEntries = [];
-      rawEntries.forEach(rawEntry => {
-        if (!rawEntry || typeof rawEntry !== 'object') {
-          return;
-        }
-        let indexValue = parseInt(rawEntry.index ?? rawEntry.playlist_index ?? rawEntry.order, 10);
-        if (!Number.isFinite(indexValue) || indexValue < 1) {
-          indexValue = normalisedEntries.length + 1;
-        }
-        const titleValue = (rawEntry.title || '').toString().trim() || `Entry ${indexValue}`;
-        const idValue = (rawEntry.id || '').toString().trim();
-        const key = idValue.toLowerCase() || titleValue.toLowerCase();
-        const existing = previousEntries.get(key);
-        const defaultType = indexValue === 1 ? 'trailer' : 'other';
-        const typeValue = existing && EXTRA_TYPE_LABELS[existing.type] ? existing.type : defaultType;
-        const nameValue = existing && typeof existing.name === 'string' ? existing.name : '';
-
-        const entryDuration = typeof rawEntry.duration === 'number' ? rawEntry.duration : null;
-        const durationText = typeof rawEntry.duration_text === 'string' ? rawEntry.duration_text : '';
-
-        normalisedEntries.push({
-          index: indexValue,
-          id: idValue,
-          title: titleValue,
-          duration: entryDuration,
-          duration_text: durationText,
-          type: EXTRA_TYPE_LABELS[typeValue] ? typeValue : defaultType,
-          name: nameValue
-        });
-      });
-
-      normalisedEntries.sort((a, b) => a.index - b.index);
-      normalisedEntries.forEach((entry, position) => {
-        entry.index = position + 1;
-      });
-
-      state.playlistEntries = normalisedEntries;
-      state.playlistTitle = playlistTitle;
-      state.playlistTotalCount = totalCount;
-      state.playlistTruncated = truncated;
-
-      if (!normalisedEntries.length && elements.playlistPreviewPlaceholder) {
-        elements.playlistPreviewPlaceholder.textContent = 'This playlist does not contain any videos.';
-      }
-
-      renderPlaylistEntries();
-      if (!normalisedEntries.length) {
-        hidePlaylistError();
-      }
-    } catch (err) {
-      const message = err && err.message ? err.message : err;
-      showPlaylistError(`Failed to load playlist: ${message}`);
-      appendConsoleLine(`ERROR: Failed to load playlist: ${message}`, 'error');
-      clearPlaylistEntries({ keepPlaceholder: true });
-    } finally {
-      setPlaylistLoading(false);
     }
   }
 
@@ -869,53 +552,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function updatePlaylistControls() {
-    const extraEnabled = elements.extraCheckbox ? elements.extraCheckbox.checked : false;
-    if (elements.playlistModeSelect) {
-      const extrasOption = elements.playlistModeSelect.querySelector('option[value="extras"]');
-      if (extrasOption) {
-        extrasOption.disabled = !extraEnabled;
-      }
-      if (!extraEnabled && elements.playlistModeSelect.value === 'extras') {
-        elements.playlistModeSelect.value = 'single';
-      }
-    }
-
-    const requiresPlaylistExtras =
-      extraEnabled && elements.playlistModeSelect && elements.playlistModeSelect.value === 'extras';
-
-    if (elements.playlistExtrasFields) {
-      elements.playlistExtrasFields.style.display = requiresPlaylistExtras ? 'block' : 'none';
-    }
-
-    if (requiresPlaylistExtras) {
-      renderPlaylistEntries();
-    } else if (elements.playlistFetchButton) {
-      elements.playlistFetchButton.textContent = 'Load Playlist Details';
-      elements.playlistFetchButton.disabled = false;
-    }
-  }
-
   function updateExtraVisibility() {
     if (!elements.extraFields || !elements.extraCheckbox || !elements.extraNameInput || !elements.extraTypeSelect) {
       return;
     }
-    const playlistMode = elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single';
     if (elements.extraCheckbox.checked) {
       elements.extraFields.style.display = 'block';
-      const requiresExtraName = playlistMode !== 'extras';
-      elements.extraNameInput.required = requiresExtraName;
-      if (!requiresExtraName) {
-        elements.extraNameInput.value = '';
-      }
+      elements.extraNameInput.required = true;
     } else {
       elements.extraFields.style.display = 'none';
       elements.extraNameInput.required = false;
       elements.extraNameInput.value = '';
       elements.extraTypeSelect.value = 'trailer';
     }
-
-    updatePlaylistControls();
   }
 
   async function loadInitialJobs() {
@@ -948,38 +597,8 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.movieNameInput.addEventListener('change', syncMovieSelection);
   }
 
-  if (elements.playlistModeSelect) {
-    elements.playlistModeSelect.addEventListener('change', () => {
-      updateExtraVisibility();
-    });
-  }
-
   if (elements.extraCheckbox) {
     elements.extraCheckbox.addEventListener('change', updateExtraVisibility);
-  }
-
-  if (elements.ytInput) {
-    elements.ytInput.addEventListener('change', () => {
-      if (state.playlistEntries.length) {
-        clearPlaylistEntries();
-        renderPlaylistEntries();
-      }
-    });
-  }
-
-  if (elements.playlistFetchButton) {
-    elements.playlistFetchButton.addEventListener('click', () => {
-      if (!state.playlistLoading) {
-        fetchPlaylistPreview();
-      }
-    });
-  }
-
-  if (elements.playlistClearButton) {
-    elements.playlistClearButton.addEventListener('click', () => {
-      clearPlaylistEntries();
-      renderPlaylistEntries();
-    });
   }
 
   if (elements.copyButton) {
@@ -988,22 +607,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   elements.form.addEventListener('submit', async event => {
     event.preventDefault();
-
-    const playlistMode = elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single';
-    const playlistExtraEntries =
-      playlistMode === 'extras'
-        ? state.playlistEntries.map(entry => ({
-            index: entry.index,
-            id: entry.id || '',
-            title: entry.title || '',
-            duration: typeof entry.duration === 'number' ? entry.duration : null,
-            type: entry.type || 'other',
-            name: entry.name || ''
-          }))
-        : [];
-    const playlistExtraTypes = playlistExtraEntries
-      .map(entry => (entry.type || '').trim())
-      .filter(value => value.length > 0);
 
     const payload = {
       yturl: elements.ytInput ? elements.ytInput.value.trim() : '',
@@ -1015,10 +618,7 @@ document.addEventListener('DOMContentLoaded', () => {
       extra: elements.extraCheckbox ? elements.extraCheckbox.checked : false,
       extraType: elements.extraTypeSelect ? elements.extraTypeSelect.value : 'trailer',
       extra_name: elements.extraNameInput ? elements.extraNameInput.value.trim() : '',
-      playlist_mode: playlistMode,
-      merge_playlist: playlistMode === 'merge',
-      playlist_extra_types: playlistExtraTypes,
-      playlist_extra_entries: playlistExtraEntries
+      playlist_mode: elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single'
     };
 
     resetConsole('Submitting request...');
@@ -1035,16 +635,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!payload.movieId) {
       errors.push('Please select a valid movie from the list.');
     }
-    if (payload.extra && !payload.extra_name && playlistMode !== 'extras') {
+    if (payload.extra && !payload.extra_name) {
       errors.push('Please provide an extra name.');
-    }
-
-    if (playlistMode === 'extras' && !payload.extra) {
-      errors.push('Playlist extras require the "Store in subfolder" option.');
-    }
-
-    if (playlistMode === 'extras' && playlistExtraEntries.length === 0) {
-      errors.push('Please load the playlist and configure at least one entry.');
     }
 
     if (errors.length) {
@@ -1094,7 +686,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   setDebugMode(initialDebugMode);
   updateExtraVisibility();
-  renderPlaylistEntries();
   renderDownloads();
   loadInitialJobs();
 });
