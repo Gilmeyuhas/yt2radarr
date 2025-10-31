@@ -15,7 +15,23 @@ document.addEventListener('DOMContentLoaded', () => {
     extraNameInput: document.getElementById('extra_name'),
     consoleDiv: document.getElementById('console'),
     downloadsList: document.getElementById('downloadsList'),
-    copyButton: document.getElementById('copyLogButton')
+    copyButton: document.getElementById('copyLogButton'),
+    movieFeedback: document.getElementById('movieFeedback'),
+    movieNotFoundPrompt: document.getElementById('movieNotFoundPrompt'),
+    movieNotFoundButton: document.getElementById('movieNotFoundButton'),
+    addMovieModal: document.getElementById('addRadarrModal'),
+    addMovieBackdrop: document.getElementById('addRadarrBackdrop'),
+    addMovieSearchInput: document.getElementById('addRadarrSearch'),
+    addMovieSearchButton: document.getElementById('addRadarrSearchButton'),
+    addMovieStatus: document.getElementById('addRadarrStatus'),
+    addMovieResults: document.getElementById('addRadarrResults'),
+    addMoviePreview: document.getElementById('addRadarrPreview'),
+    addMoviePoster: document.getElementById('addRadarrPoster'),
+    addMoviePreviewTitle: document.getElementById('addRadarrPreviewTitle'),
+    addMoviePreviewMeta: document.getElementById('addRadarrPreviewMeta'),
+    addMoviePreviewOverview: document.getElementById('addRadarrPreviewOverview'),
+    addMovieConfirmButton: document.getElementById('addRadarrConfirm'),
+    addMovieCloseButtons: document.querySelectorAll('[data-close-add-movie]')
   };
 
   if (!elements.form) {
@@ -54,7 +70,19 @@ document.addEventListener('DOMContentLoaded', () => {
     lastLogs: [],
     copyFeedbackTimeout: null,
     selectedJobId: null,
-    activeConsoleJobId: null
+    activeConsoleJobId: null,
+    addMovie: {
+      modalOpen: false,
+      searchTimeout: null,
+      searchToken: 0,
+      loading: false,
+      results: [],
+      selectedIndex: -1,
+      selectedMovie: null,
+      adding: false,
+      lastFocusedElement: null,
+      query: ''
+    }
   };
 
   const IMPORTANT_LINE_SNIPPETS = [
@@ -110,6 +138,527 @@ document.addEventListener('DOMContentLoaded', () => {
       renderLogLines(state.lastLogs);
     }
   }
+
+  function getMovieOptions() {
+    if (!elements.movieOptions) {
+      return [];
+    }
+    return Array.from(elements.movieOptions.querySelectorAll('option'));
+  }
+
+  function findMatchingMovieOption(value) {
+    if (!value) {
+      return null;
+    }
+    const target = value.trim();
+    if (!target) {
+      return null;
+    }
+    return getMovieOptions().find(option => (option.value || '').trim() === target) || null;
+  }
+
+  function buildMovieOptionValue(movie) {
+    const title = (movie && movie.title ? String(movie.title) : '').trim() || 'Movie';
+    const year = movie && movie.year ? String(movie.year).trim() : '';
+    return year ? `${title} (${year})` : title;
+  }
+
+  function upsertMovieOption(movie) {
+    if (!elements.movieOptions || !movie || typeof movie !== 'object') {
+      return null;
+    }
+    const movieId = movie.id != null ? String(movie.id) : '';
+    if (!movieId) {
+      return null;
+    }
+    const tmdbId = movie.tmdbId != null ? String(movie.tmdbId) : '';
+    const title = (movie.title || '').trim();
+    const year = movie.year != null ? String(movie.year).trim() : '';
+    const label = buildMovieOptionValue({ title, year });
+    const options = getMovieOptions();
+    let option = options.find(opt => opt.getAttribute('data-id') === movieId);
+    if (!option) {
+      option = document.createElement('option');
+      elements.movieOptions.appendChild(option);
+    }
+    option.value = label;
+    option.setAttribute('data-id', movieId);
+    option.setAttribute('data-title', title);
+    option.setAttribute('data-year', year);
+    option.setAttribute('data-tmdb', tmdbId);
+    return option;
+  }
+
+  function setMovieFeedback(message, type = 'info') {
+    if (!elements.movieFeedback) {
+      return;
+    }
+    const text = message ? String(message).trim() : '';
+    elements.movieFeedback.textContent = text;
+    elements.movieFeedback.classList.remove('is-success', 'is-error', 'is-info', 'is-warning');
+    if (!text) {
+      elements.movieFeedback.setAttribute('hidden', 'hidden');
+      return;
+    }
+    let className = 'is-info';
+    if (type === 'success') {
+      className = 'is-success';
+    } else if (type === 'error') {
+      className = 'is-error';
+    } else if (type === 'warning') {
+      className = 'is-warning';
+    }
+    elements.movieFeedback.classList.add(className);
+    elements.movieFeedback.removeAttribute('hidden');
+  }
+
+  function clearMovieFeedback() {
+    setMovieFeedback('');
+  }
+
+  function updateMovieNotFoundPrompt() {
+    if (!elements.movieNotFoundPrompt || !elements.movieNameInput) {
+      return;
+    }
+    const value = elements.movieNameInput.value ? elements.movieNameInput.value.trim() : '';
+    const hasValue = Boolean(value);
+    const option = hasValue ? findMatchingMovieOption(value) : null;
+    if (!hasValue || option) {
+      elements.movieNotFoundPrompt.setAttribute('hidden', 'hidden');
+    } else {
+      elements.movieNotFoundPrompt.removeAttribute('hidden');
+    }
+  }
+
+  function clearMovieSelection() {
+    if (elements.movieIdInput) elements.movieIdInput.value = '';
+    if (elements.titleInput) elements.titleInput.value = '';
+    if (elements.yearInput) elements.yearInput.value = '';
+    if (elements.tmdbInput) elements.tmdbInput.value = '';
+  }
+
+  function applyMovieOption(option) {
+    if (!option) {
+      clearMovieSelection();
+      return;
+    }
+    if (elements.movieIdInput) {
+      elements.movieIdInput.value = option.getAttribute('data-id') || '';
+    }
+    if (elements.titleInput) {
+      elements.titleInput.value = option.getAttribute('data-title') || '';
+    }
+    if (elements.yearInput) {
+      elements.yearInput.value = option.getAttribute('data-year') || '';
+    }
+    if (elements.tmdbInput) {
+      elements.tmdbInput.value = option.getAttribute('data-tmdb') || '';
+    }
+  }
+
+  function syncMovieSelection() {
+    if (!elements.movieNameInput) {
+      return;
+    }
+    const value = elements.movieNameInput.value ? elements.movieNameInput.value.trim() : '';
+    const option = findMatchingMovieOption(value);
+    if (option) {
+      applyMovieOption(option);
+    } else {
+      clearMovieSelection();
+    }
+    updateMovieNotFoundPrompt();
+  }
+
+  function clearAddMovieSearchTimer() {
+    if (state.addMovie.searchTimeout) {
+      clearTimeout(state.addMovie.searchTimeout);
+      state.addMovie.searchTimeout = null;
+    }
+  }
+
+  function setAddMovieStatus(message, type = 'info') {
+    if (!elements.addMovieStatus) {
+      return;
+    }
+    const text = message ? String(message).trim() : '';
+    elements.addMovieStatus.textContent = text;
+    elements.addMovieStatus.classList.remove('is-success', 'is-error', 'is-info', 'is-warning');
+    if (!text) {
+      return;
+    }
+    let className = 'is-info';
+    if (type === 'success') {
+      className = 'is-success';
+    } else if (type === 'error') {
+      className = 'is-error';
+    } else if (type === 'warning') {
+      className = 'is-warning';
+    }
+    elements.addMovieStatus.classList.add(className);
+  }
+
+  function clearAddMoviePreview() {
+    state.addMovie.selectedMovie = null;
+    if (elements.addMoviePreview) {
+      elements.addMoviePreview.setAttribute('hidden', 'hidden');
+    }
+    if (elements.addMoviePoster) {
+      elements.addMoviePoster.removeAttribute('src');
+      elements.addMoviePoster.setAttribute('hidden', 'hidden');
+    }
+    if (elements.addMoviePreviewTitle) {
+      elements.addMoviePreviewTitle.textContent = 'Select a movie';
+    }
+    if (elements.addMoviePreviewMeta) {
+      elements.addMoviePreviewMeta.textContent = '';
+    }
+    if (elements.addMoviePreviewOverview) {
+      elements.addMoviePreviewOverview.textContent = '';
+    }
+    if (elements.addMovieConfirmButton) {
+      elements.addMovieConfirmButton.disabled = true;
+    }
+  }
+
+  function findPosterUrl(movie) {
+    if (!movie) {
+      return '';
+    }
+    if (movie.remotePoster) {
+      return String(movie.remotePoster);
+    }
+    const images = Array.isArray(movie.images) ? movie.images : [];
+    const poster = images.find(image => {
+      if (!image || typeof image !== 'object') {
+        return false;
+      }
+      const coverType = (image.coverType || '').toLowerCase();
+      return coverType === 'poster' && (image.remoteUrl || image.url);
+    }) || images.find(image => image && (image.remoteUrl || image.url));
+    if (!poster) {
+      return '';
+    }
+    return poster.remoteUrl || poster.url || '';
+  }
+
+  function renderAddMoviePreview(movie) {
+    if (!movie) {
+      clearAddMoviePreview();
+      return;
+    }
+    state.addMovie.selectedMovie = movie;
+    if (elements.addMoviePreview) {
+      elements.addMoviePreview.removeAttribute('hidden');
+    }
+    const title = (movie.title || '').trim() || 'Movie';
+    const year = movie.year ? String(movie.year).trim() : '';
+    if (elements.addMoviePreviewTitle) {
+      elements.addMoviePreviewTitle.textContent = year ? `${title} (${year})` : title;
+    }
+    const metaParts = [];
+    if (movie.runtime) {
+      metaParts.push(`${movie.runtime} min`);
+    }
+    if (Array.isArray(movie.genres) && movie.genres.length) {
+      metaParts.push(movie.genres.slice(0, 3).join(', '));
+    }
+    if (elements.addMoviePreviewMeta) {
+      elements.addMoviePreviewMeta.textContent = metaParts.join(' • ');
+    }
+    if (elements.addMoviePreviewOverview) {
+      const overview = (movie.overview || '').trim();
+      elements.addMoviePreviewOverview.textContent = overview || 'No overview available for this title.';
+    }
+    if (elements.addMoviePoster) {
+      const posterUrl = findPosterUrl(movie);
+      if (posterUrl) {
+        elements.addMoviePoster.src = posterUrl;
+        elements.addMoviePoster.removeAttribute('hidden');
+      } else {
+        elements.addMoviePoster.removeAttribute('src');
+        elements.addMoviePoster.setAttribute('hidden', 'hidden');
+      }
+    }
+    if (elements.addMovieConfirmButton) {
+      elements.addMovieConfirmButton.disabled = false;
+    }
+  }
+
+  function renderAddMovieResults() {
+    if (!elements.addMovieResults) {
+      return;
+    }
+    const results = Array.isArray(state.addMovie.results) ? state.addMovie.results : [];
+    elements.addMovieResults.innerHTML = '';
+    if (!results.length) {
+      elements.addMovieResults.setAttribute('hidden', 'hidden');
+      return;
+    }
+    elements.addMovieResults.removeAttribute('hidden');
+    results.forEach((movie, index) => {
+      const item = document.createElement('li');
+      item.className = 'modal-result';
+      if (index === state.addMovie.selectedIndex) {
+        item.classList.add('is-selected');
+      }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'modal-result-button';
+      button.dataset.index = String(index);
+
+      const titleSpan = document.createElement('span');
+      titleSpan.className = 'result-title';
+      const title = (movie.title || '').trim() || 'Movie';
+      const year = movie.year ? String(movie.year).trim() : '';
+      titleSpan.textContent = year ? `${title} (${year})` : title;
+      button.appendChild(titleSpan);
+
+      const metaParts = [];
+      if (movie.runtime) {
+        metaParts.push(`${movie.runtime} min`);
+      }
+      if (Array.isArray(movie.genres) && movie.genres.length) {
+        metaParts.push(movie.genres.slice(0, 2).join(', '));
+      }
+      if (metaParts.length) {
+        const meta = document.createElement('span');
+        meta.className = 'result-meta';
+        meta.textContent = metaParts.join(' • ');
+        button.appendChild(meta);
+      }
+
+      if (movie.overview) {
+        const overview = document.createElement('span');
+        overview.className = 'result-overview';
+        const summary = String(movie.overview).trim();
+        overview.textContent = summary.length > 180 ? `${summary.slice(0, 177)}…` : summary;
+        button.appendChild(overview);
+      }
+
+      item.appendChild(button);
+      elements.addMovieResults.appendChild(item);
+    });
+  }
+
+  function resetAddMovieState() {
+    clearAddMovieSearchTimer();
+    state.addMovie.loading = false;
+    state.addMovie.results = [];
+    state.addMovie.selectedIndex = -1;
+    state.addMovie.selectedMovie = null;
+    state.addMovie.adding = false;
+    state.addMovie.query = '';
+    setAddMovieStatus('');
+    renderAddMovieResults();
+    clearAddMoviePreview();
+  }
+
+  function openAddMovieModal(initialQuery = '') {
+    if (!elements.addMovieModal) {
+      return;
+    }
+    clearMovieFeedback();
+    state.addMovie.modalOpen = true;
+    state.addMovie.lastFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    state.addMovie.searchToken = 0;
+    elements.addMovieModal.removeAttribute('hidden');
+    document.body.classList.add('modal-open');
+    resetAddMovieState();
+    const query = (initialQuery || '').trim();
+    if (elements.addMovieSearchInput) {
+      elements.addMovieSearchInput.value = query;
+      elements.addMovieSearchInput.focus();
+      if (query.length >= 2) {
+        scheduleAddMovieSearch({ immediate: true });
+      } else {
+        setAddMovieStatus('Enter at least 2 characters to search Radarr.', 'info');
+      }
+    } else {
+      setAddMovieStatus('Enter at least 2 characters to search Radarr.', 'info');
+    }
+  }
+
+  function closeAddMovieModal(options = {}) {
+    if (!elements.addMovieModal || !state.addMovie.modalOpen) {
+      return;
+    }
+    elements.addMovieModal.setAttribute('hidden', 'hidden');
+    document.body.classList.remove('modal-open');
+    resetAddMovieState();
+    state.addMovie.modalOpen = false;
+    const restoreFocus = options.restoreFocus !== false;
+    const lastFocused = state.addMovie.lastFocusedElement;
+    state.addMovie.lastFocusedElement = null;
+    if (restoreFocus && lastFocused && typeof lastFocused.focus === 'function') {
+      lastFocused.focus();
+    }
+  }
+
+  function selectAddMovieResult(index) {
+    const results = Array.isArray(state.addMovie.results) ? state.addMovie.results : [];
+    const numericIndex = Number(index);
+    if (!Number.isInteger(numericIndex) || numericIndex < 0 || numericIndex >= results.length) {
+      return;
+    }
+    state.addMovie.selectedIndex = numericIndex;
+    renderAddMovieResults();
+    renderAddMoviePreview(results[numericIndex]);
+    setAddMovieStatus('Ready to add this movie to Radarr.', 'success');
+  }
+
+  function scheduleAddMovieSearch(options = {}) {
+    if (!elements.addMovieSearchInput) {
+      return;
+    }
+    const query = elements.addMovieSearchInput.value ? elements.addMovieSearchInput.value.trim() : '';
+    state.addMovie.query = query;
+    clearAddMovieSearchTimer();
+    if (!query || query.length < 2) {
+      resetAddMovieState();
+      setAddMovieStatus('Enter at least 2 characters to search Radarr.', 'info');
+      return;
+    }
+    if (options.immediate) {
+      performAddMovieSearch(query);
+      return;
+    }
+    state.addMovie.searchTimeout = setTimeout(() => {
+      performAddMovieSearch(query);
+    }, 350);
+  }
+
+  async function performAddMovieSearch(query) {
+    const token = ++state.addMovie.searchToken;
+    state.addMovie.loading = true;
+    setAddMovieStatus('Searching Radarr…', 'info');
+    if (elements.addMovieConfirmButton) {
+      elements.addMovieConfirmButton.disabled = true;
+    }
+    try {
+      const response = await fetch(`/radarr/search?query=${encodeURIComponent(query)}`);
+      const data = await response.json().catch(() => ({}));
+      if (token !== state.addMovie.searchToken) {
+        return;
+      }
+      if (!response.ok) {
+        const message = data && data.error ? data.error : `Search failed (HTTP ${response.status}).`;
+        state.addMovie.results = [];
+        state.addMovie.selectedIndex = -1;
+        state.addMovie.selectedMovie = null;
+        renderAddMovieResults();
+        clearAddMoviePreview();
+        setAddMovieStatus(message, 'error');
+        return;
+      }
+      const results = Array.isArray(data.results) ? data.results.filter(item => item && item.tmdbId) : [];
+      state.addMovie.results = results;
+      state.addMovie.selectedIndex = -1;
+      state.addMovie.selectedMovie = null;
+      renderAddMovieResults();
+      clearAddMoviePreview();
+      if (!results.length) {
+        setAddMovieStatus('No matches found in Radarr for that search.', 'warning');
+      } else {
+        setAddMovieStatus('Select a movie below to add it to Radarr.', 'info');
+      }
+    } catch (err) {
+      if (token !== state.addMovie.searchToken) {
+        return;
+      }
+      state.addMovie.results = [];
+      state.addMovie.selectedIndex = -1;
+      state.addMovie.selectedMovie = null;
+      renderAddMovieResults();
+      clearAddMoviePreview();
+      setAddMovieStatus(`Failed to search Radarr: ${err && err.message ? err.message : err}`, 'error');
+    } finally {
+      if (token === state.addMovie.searchToken) {
+        state.addMovie.loading = false;
+      }
+    }
+  }
+
+  function handleMovieAdded(movie) {
+    upsertMovieOption(movie);
+    if (elements.movieNameInput) {
+      elements.movieNameInput.value = buildMovieOptionValue(movie);
+      elements.movieNameInput.focus();
+      elements.movieNameInput.select();
+    }
+    syncMovieSelection();
+    updateMovieNotFoundPrompt();
+    if (movie && movie.title) {
+      appendConsoleLine(`Added movie to Radarr: ${buildMovieOptionValue(movie)}`);
+    }
+  }
+
+  async function handleAddMovieConfirm() {
+    if (!elements.addMovieConfirmButton || elements.addMovieConfirmButton.disabled) {
+      return;
+    }
+    const movie = state.addMovie.selectedMovie;
+    if (!movie || !movie.tmdbId) {
+      return;
+    }
+    const originalLabel = elements.addMovieConfirmButton.textContent;
+    elements.addMovieConfirmButton.disabled = true;
+    elements.addMovieConfirmButton.textContent = 'Adding…';
+    state.addMovie.adding = true;
+    setAddMovieStatus('Adding movie to Radarr…', 'info');
+    try {
+      const response = await fetch('/radarr/movies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tmdbId: movie.tmdbId, search: true })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = data && data.error ? data.error : `Failed to add movie (HTTP ${response.status}).`;
+        setAddMovieStatus(message, 'error');
+        elements.addMovieConfirmButton.disabled = false;
+        elements.addMovieConfirmButton.textContent = originalLabel;
+        state.addMovie.adding = false;
+        return;
+      }
+      const created = data && data.movie ? data.movie : null;
+      if (!created) {
+        setAddMovieStatus('Movie was added, but no details were returned.', 'warning');
+        elements.addMovieConfirmButton.disabled = false;
+        elements.addMovieConfirmButton.textContent = originalLabel;
+        state.addMovie.adding = false;
+        return;
+      }
+      handleMovieAdded(created);
+      closeAddMovieModal();
+      setMovieFeedback(`Added "${buildMovieOptionValue(created)}" to Radarr and selected it.`, 'success');
+    } catch (err) {
+      const message = err && err.message ? err.message : err;
+      setAddMovieStatus(`Failed to add movie to Radarr: ${message}`, 'error');
+      elements.addMovieConfirmButton.disabled = false;
+    } finally {
+      state.addMovie.adding = false;
+      if (elements.addMovieConfirmButton) {
+        elements.addMovieConfirmButton.textContent = originalLabel;
+      }
+    }
+  }
+
+  function handleMovieNameInput() {
+    syncMovieSelection();
+    clearMovieFeedback();
+  }
+
+  function initialiseMovieNotFoundPrompt() {
+    updateMovieNotFoundPrompt();
+    if (elements.movieNotFoundButton) {
+      elements.movieNotFoundButton.addEventListener('click', () => {
+        const initialQuery = elements.movieNameInput ? elements.movieNameInput.value.trim() : '';
+        openAddMovieModal(initialQuery);
+      });
+    }
+  }
+
 
   function shouldDisplayLogLine(line) {
     const original = typeof line === 'string' ? line : String(line ?? '');
@@ -564,32 +1113,17 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function syncMovieSelection() {
-    if (!elements.movieNameInput || !elements.movieOptions) {
+    if (!elements.movieNameInput) {
       return;
     }
-    const inputVal = elements.movieNameInput.value.trim();
-    const options = Array.from(elements.movieOptions.options || []);
-    const matchedOption = options.find(option => option.value === inputVal) || null;
-
-    if (matchedOption) {
-      if (elements.movieIdInput) {
-        elements.movieIdInput.value = matchedOption.getAttribute('data-id') || '';
-      }
-      if (elements.titleInput) {
-        elements.titleInput.value = matchedOption.getAttribute('data-title') || '';
-      }
-      if (elements.yearInput) {
-        elements.yearInput.value = matchedOption.getAttribute('data-year') || '';
-      }
-      if (elements.tmdbInput) {
-        elements.tmdbInput.value = matchedOption.getAttribute('data-tmdb') || '';
-      }
+    const value = elements.movieNameInput.value ? elements.movieNameInput.value.trim() : '';
+    const option = findMatchingMovieOption(value);
+    if (option) {
+      applyMovieOption(option);
     } else {
-      if (elements.movieIdInput) elements.movieIdInput.value = '';
-      if (elements.titleInput) elements.titleInput.value = '';
-      if (elements.yearInput) elements.yearInput.value = '';
-      if (elements.tmdbInput) elements.tmdbInput.value = '';
+      clearMovieSelection();
     }
+    updateMovieNotFoundPrompt();
   }
 
   function updateExtraVisibility() {
@@ -633,9 +1167,68 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   if (elements.movieNameInput) {
-    elements.movieNameInput.addEventListener('input', syncMovieSelection);
-    elements.movieNameInput.addEventListener('change', syncMovieSelection);
+    elements.movieNameInput.addEventListener('input', handleMovieNameInput);
+    elements.movieNameInput.addEventListener('change', handleMovieNameInput);
   }
+
+  initialiseMovieNotFoundPrompt();
+  syncMovieSelection();
+
+  if (elements.addMovieBackdrop) {
+    elements.addMovieBackdrop.addEventListener('click', () => {
+      closeAddMovieModal();
+    });
+  }
+
+  if (elements.addMovieCloseButtons && typeof elements.addMovieCloseButtons.forEach === 'function') {
+    elements.addMovieCloseButtons.forEach(button => {
+      button.addEventListener('click', () => {
+        closeAddMovieModal();
+      });
+    });
+  }
+
+  if (elements.addMovieSearchInput) {
+    elements.addMovieSearchInput.addEventListener('input', () => scheduleAddMovieSearch());
+    elements.addMovieSearchInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        scheduleAddMovieSearch({ immediate: true });
+      }
+    });
+  }
+
+  if (elements.addMovieSearchButton) {
+    elements.addMovieSearchButton.addEventListener('click', () => {
+      scheduleAddMovieSearch({ immediate: true });
+    });
+  }
+
+  if (elements.addMovieResults) {
+    elements.addMovieResults.addEventListener('click', event => {
+      const button = event.target instanceof Element ? event.target.closest('.modal-result-button') : null;
+      if (!button) {
+        return;
+      }
+      const index = button.dataset ? button.dataset.index : null;
+      if (index === null || index === undefined) {
+        return;
+      }
+      event.preventDefault();
+      selectAddMovieResult(Number(index));
+    });
+  }
+
+  if (elements.addMovieConfirmButton) {
+    elements.addMovieConfirmButton.addEventListener('click', handleAddMovieConfirm);
+  }
+
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && state.addMovie.modalOpen) {
+      event.preventDefault();
+      closeAddMovieModal();
+    }
+  });
 
   if (elements.extraCheckbox) {
     elements.extraCheckbox.addEventListener('change', updateExtraVisibility);
