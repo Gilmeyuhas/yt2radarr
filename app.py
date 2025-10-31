@@ -521,8 +521,6 @@ def create():
     if extra and not extra_name:
         error("Extra name is required when storing in a subfolder.")
 
-    merge_playlist = bool(data.get("merge_playlist"))
-
     if errors:
         return jsonify({"logs": logs}), 400
 
@@ -536,7 +534,7 @@ def create():
         "extra": extra,
         "extraType": (data.get("extraType") or "trailer").strip().lower(),
         "extra_name": extra_name,
-        "merge_playlist": merge_playlist,
+        "merge_playlist": bool(data.get("merge_playlist")),
     }
 
     descriptors = _describe_job(payload)
