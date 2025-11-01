@@ -25,6 +25,8 @@ from flask import (  # pylint: disable=import-error
     request,
     url_for,
 )
+from yt_dlp import YoutubeDL  # pylint: disable=import-error
+from yt_dlp.utils import DownloadError, ExtractorError  # pylint: disable=import-error
 
 from jobs import JobRepository
 
@@ -68,6 +70,8 @@ YTDLP_FORMAT_SELECTOR = (
     "95/"
     "best"
 )
+
+YOUTUBE_SEARCH_MAX_RESULTS = 20
 def _format_filesize(value: Optional[float]) -> str:
     """Return a human-readable string for a byte size."""
 
@@ -196,6 +200,65 @@ def _cleanup_temp_files(pattern: Optional[str]) -> None:
                 os.remove(leftover)
             except OSError:
                 continue
+
+
+def _search_youtube(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Return metadata for the top YouTube matches for the provided query."""
+
+    search_terms = query.strip()
+    if not search_terms:
+        return []
+    try:
+        max_results = int(limit or 1)
+    except (TypeError, ValueError):
+        max_results = 1
+    max_results = max(1, min(max_results, YOUTUBE_SEARCH_MAX_RESULTS))
+    search_expression = f"ytsearch{max_results}:{search_terms}"
+    options = {
+        "quiet": True,
+        "skip_download": True,
+        "extract_flat": False,
+        "noplaylist": True,
+        "cachedir": False,
+    }
+    try:
+        with YoutubeDL(options) as ydl:
+            info = ydl.extract_info(search_expression, download=False)
+    except (DownloadError, ExtractorError) as exc:
+        raise RuntimeError(f"YouTube search failed: {exc}") from exc
+
+    entries: List[Dict[str, Any]] = []
+    if isinstance(info, dict):
+        raw_entries = info.get("entries")
+        if isinstance(raw_entries, list) and raw_entries:
+            entries = [entry for entry in raw_entries if isinstance(entry, dict)]
+        elif info.get("_type") == "video":
+            entries = [info]
+    elif isinstance(info, list):
+        entries = [entry for entry in info if isinstance(entry, dict)]
+
+    results: List[Dict[str, Any]] = []
+    for entry in entries:
+        video_id = entry.get("id") or entry.get("url")
+        url = entry.get("webpage_url")
+        if not url and isinstance(video_id, str):
+            if video_id.startswith("http://") or video_id.startswith("https://"):
+                url = video_id
+            else:
+                url = f"https://www.youtube.com/watch?v={video_id}"
+        if not url:
+            continue
+        results.append(
+            {
+                "id": video_id,
+                "title": entry.get("title"),
+                "url": url,
+                "uploader": entry.get("uploader") or entry.get("channel"),
+                "viewCount": entry.get("view_count"),
+                "duration": entry.get("duration"),
+            }
+        )
+    return results
 
 
 def _cleanup_playlist_dir(path: Optional[str]) -> None:
@@ -844,6 +907,33 @@ def _format_quality_profile(entry: Dict[str, Any]) -> Dict[str, Any]:
         "id": entry.get("id"),
         "name": entry.get("name") or f"Profile {entry.get('id')}",
     }
+
+
+@app.route("/youtube/search", methods=["GET"])
+def youtube_search() -> Response:
+    """Search for YouTube videos matching the supplied query."""
+
+    query = (request.args.get("q") or "").strip()
+    if len(query) < 2:
+        return (
+            jsonify({"error": "Please provide a search query with at least 2 characters."}),
+            400,
+        )
+
+    limit_value = request.args.get("limit", default=10, type=int)
+    if limit_value is None:
+        limit_value = 10
+
+    try:
+        results = _search_youtube(query, limit=limit_value)
+    except RuntimeError as exc:
+        app.logger.error("Failed to search YouTube for query %r: %s", query, exc)
+        return jsonify({"error": "Failed to search YouTube."}), 502
+    except Exception:  # pragma: no cover - defensive coding for unexpected failures
+        app.logger.exception("Unexpected error during YouTube search for %r", query)
+        return jsonify({"error": "Failed to search YouTube."}), 500
+
+    return jsonify({"results": results})
 
 
 @app.route("/radarr/options", methods=["GET"])

@@ -386,6 +386,21 @@ form {
 .movie-input-wrapper button {
   white-space: nowrap;
 }
+
+.youtube-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.youtube-input-wrapper input {
+  min-width: 0;
+}
+
+.youtube-input-wrapper button {
+  white-space: nowrap;
+}
 .form-group label {
   width: 140px;
   margin-right: 10px;
