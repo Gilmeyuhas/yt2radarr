@@ -209,14 +209,6 @@ def _cleanup_playlist_dir(path: Optional[str]) -> None:
     if path and os.path.isdir(path):
         shutil.rmtree(path, ignore_errors=True)
 
-
-def _cleanup_directory(path: Optional[str]) -> None:
-    """Remove a directory tree if it exists."""
-
-    if path and os.path.isdir(path):
-        shutil.rmtree(path, ignore_errors=True)
-
-
 def _resolve_requested_format(info_payload: Dict[str, Any]) -> Dict[str, str]:
     """Extract a concise summary of the selected YouTube formats."""
 
@@ -1449,7 +1441,6 @@ def process_download_job(
     playlist_temp_dir: Optional[str] = None
     expected_pattern: Optional[str] = None
     downloaded_candidates: List[str] = []
-    info_json_paths: List[str] = []
     merge_playlist = False
 
     def acknowledge_cancellation() -> None:
@@ -1535,7 +1526,6 @@ def process_download_job(
         target_dir = ""
         canonical_stem = ""
         standalone_base_path: Optional[str] = None
-        standalone_staging_dir: Optional[str] = None
         download_dir: Optional[str] = None
 
         if standalone:
@@ -1545,27 +1535,7 @@ def process_download_job(
                 return
             log("Standalone download requested; skipping Radarr library lookup.")
             log(f"Standalone base path resolved to '{standalone_base_path}'.")
-            staging_root = os.path.join(standalone_base_path, ".yt2radarr_staging")
-            try:
-                os.makedirs(staging_root, exist_ok=True)
-            except OSError as exc:
-                fail(f"Failed to create standalone staging root '{staging_root}': {exc}")
-                return
-            standalone_staging_dir = os.path.join(staging_root, job_id)
-            try:
-                os.makedirs(standalone_staging_dir, exist_ok=True)
-            except OSError as exc:
-                fail(
-                    f"Failed to create standalone staging directory "
-                    f"'{standalone_staging_dir}': {exc}"
-                )
-                return
-            log(
-                "Standalone downloads will be staged in "
-                f"'{os.path.basename(standalone_staging_dir)}'."
-            )
-            target_dir = standalone_staging_dir
-            download_dir = standalone_staging_dir
+            target_dir = standalone_base_path
             _job_status(job_id, "processing", progress=10)
         else:
             resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
@@ -1668,6 +1638,8 @@ def process_download_job(
         ]
         if merge_playlist:
             info_command.append("--yes-playlist")
+        else:
+            info_command.append("--no-playlist")
         info_command += [
             "--print-json",
             yt_url,
@@ -1682,134 +1654,124 @@ def process_download_job(
         info_returncode: Optional[int] = None
         metadata_timed_out = False
 
-        if standalone:
-            log(
-                "Skipping upfront metadata probe for standalone download; "
-                "metadata will be gathered after the download completes."
-            )
-        else:
-            log("Fetching YouTube metadata to determine output naming and formats.")
+        log("Fetching YouTube metadata to determine output naming and formats.")
 
-            try:
-                with subprocess.Popen(
-                    info_command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    stdin=subprocess.DEVNULL,
-                    text=False,
-                ) as info_process:
-                    _set_job_process(job_id, info_process)
-                    start_time = time.monotonic()
+        try:
+            with subprocess.Popen(
+                info_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                text=False,
+            ) as info_process:
+                _set_job_process(job_id, info_process)
+                start_time = time.monotonic()
 
-                    selector = selectors.DefaultSelector()
-                    stdout_chunks: List[bytes] = []
-                    stderr_chunks: List[bytes] = []
+                selector = selectors.DefaultSelector()
+                stdout_chunks: List[bytes] = []
+                stderr_chunks: List[bytes] = []
 
-                    if info_process.stdout is not None:
-                        selector.register(
-                            info_process.stdout, selectors.EVENT_READ, "stdout"
-                        )
-                    if info_process.stderr is not None:
-                        selector.register(
-                            info_process.stderr, selectors.EVENT_READ, "stderr"
-                        )
+                if info_process.stdout is not None:
+                    selector.register(info_process.stdout, selectors.EVENT_READ, "stdout")
+                if info_process.stderr is not None:
+                    selector.register(info_process.stderr, selectors.EVENT_READ, "stderr")
 
-                    def _drain_events(timeout: float) -> None:
-                        try:
-                            events = selector.select(timeout=timeout)
-                        except OSError:
-                            events = []
-                        for key, _ in events:
-                            stream = key.fileobj
-                            label = key.data
-                            try:
-                                chunk = stream.read1(4096)
-                            except (ValueError, OSError):
-                                chunk = b""
-                            if not chunk:
-                                try:
-                                    selector.unregister(stream)
-                                except (KeyError, ValueError):
-                                    pass
-                                try:
-                                    stream.close()
-                                except OSError:
-                                    pass
-                                continue
-                            if label == "stdout":
-                                stdout_chunks.append(chunk)
-                            else:
-                                stderr_chunks.append(chunk)
-
+                def _drain_events(timeout: float) -> None:
                     try:
-                        while True:
-                            if cancel_event.is_set():
-                                acknowledge_cancellation()
-                                _terminate_process(info_process)
-                                raise JobCancelled()
-
-                            if METADATA_FETCH_TIMEOUT_SECONDS:
-                                elapsed = time.monotonic() - start_time
-                                if elapsed >= METADATA_FETCH_TIMEOUT_SECONDS:
-                                    metadata_timed_out = True
-                                    warn(
-                                        "yt-dlp metadata query exceeded "
-                                        f"{METADATA_FETCH_TIMEOUT_SECONDS} seconds; "
-                                        "continuing without metadata."
-                                    )
-                                    _terminate_process(info_process)
-                                    break
-
-                            _drain_events(timeout=0.2)
-
-                            if not selector.get_map():
-                                if info_process.poll() is not None:
-                                    break
-                                try:
-                                    info_process.wait(timeout=0.2)
-                                except subprocess.TimeoutExpired:
-                                    continue
-                                else:
-                                    break
-
-                            if info_process.poll() is not None:
-                                # Process has exited but there may still be buffered data.
-                                _drain_events(timeout=0)
-                                if not selector.get_map():
-                                    break
-                    finally:
-                        # Drain any remaining buffered data without blocking.
+                        events = selector.select(timeout=timeout)
+                    except OSError:
+                        events = []
+                    for key, _ in events:
+                        stream = key.fileobj
+                        label = key.data
                         try:
-                            _drain_events(timeout=0)
-                        except Exception:  # pragma: no cover - defensive cleanup
-                            pass
-                        selector.close()
+                            chunk = stream.read1(4096)
+                        except (ValueError, OSError):
+                            chunk = b""
+                        if not chunk:
+                            try:
+                                selector.unregister(stream)
+                            except (KeyError, ValueError):
+                                pass
+                            try:
+                                stream.close()
+                            except OSError:
+                                pass
+                            continue
+                        if label == "stdout":
+                            stdout_chunks.append(chunk)
+                        else:
+                            stderr_chunks.append(chunk)
 
+                try:
+                    while True:
+                        if cancel_event.is_set():
+                            acknowledge_cancellation()
+                            _terminate_process(info_process)
+                            raise JobCancelled()
+
+                        if METADATA_FETCH_TIMEOUT_SECONDS:
+                            elapsed = time.monotonic() - start_time
+                            if elapsed >= METADATA_FETCH_TIMEOUT_SECONDS:
+                                metadata_timed_out = True
+                                warn(
+                                    "yt-dlp metadata query exceeded "
+                                    f"{METADATA_FETCH_TIMEOUT_SECONDS} seconds; "
+                                    "continuing without metadata."
+                                )
+                                _terminate_process(info_process)
+                                break
+
+                        _drain_events(timeout=0.2)
+
+                        if not selector.get_map():
+                            if info_process.poll() is not None:
+                                break
+                            try:
+                                info_process.wait(timeout=0.2)
+                            except subprocess.TimeoutExpired:
+                                continue
+                            else:
+                                break
+
+                        if info_process.poll() is not None:
+                            # Process has exited but there may still be buffered data.
+                            _drain_events(timeout=0)
+                            if not selector.get_map():
+                                break
+                finally:
+                    # Drain any remaining buffered data without blocking.
+                    try:
+                        _drain_events(timeout=0)
+                    except Exception:  # pragma: no cover - defensive cleanup
+                        pass
+                    selector.close()
+
+                try:
+                    info_returncode = info_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    _terminate_process(info_process)
                     try:
                         info_returncode = info_process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        _terminate_process(info_process)
-                        try:
-                            info_returncode = info_process.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            info_returncode = info_process.returncode
-                    except OSError:
                         info_returncode = info_process.returncode
+                except OSError:
+                    info_returncode = info_process.returncode
 
-                    info_stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace")
-                    info_stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace")
-            except (
-                FileNotFoundError,
-                OSError,
-                ValueError,
-            ) as exc:  # pragma: no cover - command failure
-                warn(f"Failed to query format details via yt-dlp: {exc}")
-            finally:
-                _clear_job_process(job_id)
+                info_stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace")
+                info_stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+        except (
+            FileNotFoundError,
+            OSError,
+            ValueError,
+        ) as exc:  # pragma: no cover - command failure
+            warn(f"Failed to query format details via yt-dlp: {exc}")
+        finally:
+            _clear_job_process(job_id)
 
-            if cancel_event.is_set():
-                acknowledge_cancellation()
-                raise JobCancelled()
+        if cancel_event.is_set():
+            acknowledge_cancellation()
+            raise JobCancelled()
 
             if info_returncode not in (0, None) and not metadata_timed_out:
                 warn(
@@ -1847,7 +1809,7 @@ def process_download_job(
                 f"audio_codec={resolved_format['audio_codec']}, "
                 f"filesize={resolved_format['filesize']}"
             )
-        elif not standalone:
+        else:
             log("yt-dlp did not report a resolved format; proceeding with download.")
 
         if not descriptive:
@@ -1887,16 +1849,73 @@ def process_download_job(
 
         filename_base = filename_base or "Video"
 
+        if standalone:
+            standalone_folder_name = filename_base
+            if info_payload:
+                if merge_playlist:
+                    standalone_folder_name = (
+                        info_payload.get("playlist_title")
+                        or info_payload.get("playlist")
+                        or info_payload.get("title")
+                        or standalone_folder_name
+                    )
+                else:
+                    standalone_folder_name = (
+                        info_payload.get("title") or standalone_folder_name
+                    )
+
+            standalone_folder_name = sanitize_filename(
+                (standalone_folder_name or "").strip()
+            ) or filename_base or "Video"
+
+            if not canonical_stem:
+                canonical_stem = standalone_folder_name
+
+            if standalone_base_path is None:
+                fail("Standalone downloads require a configured library path.")
+                return
+
+            final_folder_path = os.path.join(
+                standalone_base_path, standalone_folder_name
+            )
+            created_new = False
+            if os.path.isfile(final_folder_path):
+                suffix = 1
+                base_name = standalone_folder_name
+                while True:
+                    candidate_name = f"{base_name} ({suffix})"
+                    candidate_path = os.path.join(
+                        standalone_base_path, candidate_name
+                    )
+                    if not os.path.exists(candidate_path) or os.path.isdir(candidate_path):
+                        final_folder_path = candidate_path
+                        standalone_folder_name = candidate_name
+                        break
+                    suffix += 1
+
+            if not os.path.isdir(final_folder_path):
+                try:
+                    os.makedirs(final_folder_path, exist_ok=True)
+                except OSError as exc:
+                    fail(f"Failed to create standalone folder '{final_folder_path}': {exc}")
+                    return
+                created_new = True
+
+            if created_new:
+                log(f"Created standalone folder at '{final_folder_path}'.")
+            else:
+                log(f"Standalone folder resolved to '{final_folder_path}'.")
+
+            target_dir = final_folder_path
+            download_dir = final_folder_path
+            filename_base = standalone_folder_name
+            canonical_stem = standalone_folder_name
+
         if download_dir is None:
             fail("Internal error: download directory could not be determined.")
             return
 
         download_filename_base = filename_base
-
-        if standalone:
-            download_filename_base = f"yt2radarr_{job_id}"
-            if not canonical_stem:
-                canonical_stem = filename_base
 
         pattern = os.path.join(download_dir, f"{download_filename_base}.*")
         if any(os.path.exists(path) for path in glob_paths(pattern)):
@@ -1937,8 +1956,8 @@ def process_download_job(
         command += ["-f", format_selector]
         if merge_playlist:
             command.append("--yes-playlist")
-        if standalone:
-            command.append("--write-info-json")
+        else:
+            command.append("--no-playlist")
         command += ["-o", target_template, yt_url]
 
         log("Running yt-dlp with explicit output template.")
@@ -2200,102 +2219,6 @@ def process_download_job(
             target_path = downloaded_candidates[0]
         actual_extension = os.path.splitext(target_path)[1].lstrip(".").lower()
 
-        info_json_paths: List[str] = []
-        if download_dir:
-            info_json_paths = [
-                path
-                for path in glob_paths(os.path.join(download_dir, "*.info.json"))
-                if os.path.isfile(path)
-            ]
-
-        if standalone:
-            standalone_info_payload: Optional[Dict[str, Any]] = None
-            if info_json_paths:
-                info_json_paths.sort(key=os.path.getmtime, reverse=True)
-                for info_path in info_json_paths:
-                    try:
-                        with open(info_path, "r", encoding="utf-8") as handle:
-                            standalone_info_payload = json.load(handle)
-                    except (OSError, json.JSONDecodeError):
-                        continue
-                    else:
-                        break
-
-            if standalone_info_payload and not info_payload:
-                info_payload = standalone_info_payload
-
-            if standalone_info_payload and not resolved_format:
-                resolved_format = _resolve_requested_format(standalone_info_payload)
-
-            standalone_folder_name = filename_base
-            if standalone_info_payload:
-                if merge_playlist:
-                    standalone_folder_name = (
-                        standalone_info_payload.get("playlist_title")
-                        or standalone_info_payload.get("playlist")
-                        or standalone_info_payload.get("title")
-                        or standalone_folder_name
-                    )
-                else:
-                    standalone_folder_name = (
-                        standalone_info_payload.get("title")
-                        or standalone_folder_name
-                    )
-
-            standalone_folder_name = sanitize_filename(
-                (standalone_folder_name or "").strip()
-            ) or filename_base or "Video"
-
-            if not canonical_stem:
-                canonical_stem = standalone_folder_name
-
-            if standalone_base_path is None:
-                fail("Standalone downloads require a configured library path.")
-                return
-
-            final_folder_path = os.path.join(standalone_base_path, standalone_folder_name)
-            created_new = False
-            if os.path.isfile(final_folder_path):
-                suffix = 1
-                base_name = standalone_folder_name
-                while True:
-                    candidate_name = f"{base_name} ({suffix})"
-                    candidate_path = os.path.join(standalone_base_path, candidate_name)
-                    if not os.path.exists(candidate_path) or os.path.isdir(candidate_path):
-                        final_folder_path = candidate_path
-                        standalone_folder_name = candidate_name
-                        break
-                    suffix += 1
-
-            if not os.path.isdir(final_folder_path):
-                try:
-                    os.makedirs(final_folder_path, exist_ok=True)
-                except OSError as exc:
-                    fail(f"Failed to create standalone folder '{final_folder_path}': {exc}")
-                    return
-                created_new = True
-
-            if created_new:
-                log(f"Created standalone folder at '{final_folder_path}'.")
-            else:
-                log(f"Standalone folder resolved to '{final_folder_path}'.")
-
-            target_dir = final_folder_path
-            filename_base = standalone_folder_name
-            canonical_stem = standalone_folder_name
-
-            if resolved_format:
-                log(
-                    "Resolved YouTube format: "
-                    f"id={resolved_format['format_id']}, "
-                    f"resolution={resolved_format['resolution']}, "
-                    f"video_codec={resolved_format['video_codec']}, "
-                    f"audio_codec={resolved_format['audio_codec']}, "
-                    f"filesize={resolved_format['filesize']}"
-                )
-            else:
-                log("yt-dlp did not report a resolved format; proceeding with download.")
-
         job_snapshot = jobs_repo.get(job_id)
         if job_snapshot:
             metadata = list(job_snapshot.get("metadata") or [])
@@ -2397,18 +2320,6 @@ def process_download_job(
             except OSError:
                 pass
 
-        if standalone:
-            for info_path in info_json_paths:
-                try:
-                    os.remove(info_path)
-                except OSError:
-                    continue
-            if standalone_staging_dir and os.path.isdir(standalone_staging_dir):
-                try:
-                    shutil.rmtree(standalone_staging_dir)
-                except OSError:
-                    pass
-
         _job_status(job_id, "processing", progress=100)
         log(f"Success! Video saved as '{target_path}'.")
         _mark_job_success(job_id)
@@ -2420,24 +2331,10 @@ def process_download_job(
             except OSError:
                 continue
         _cleanup_playlist_dir(playlist_temp_dir)
-        if standalone:
-            for info_path in info_json_paths:
-                try:
-                    os.remove(info_path)
-                except OSError:
-                    continue
-            _cleanup_directory(standalone_staging_dir)
         append_job_log(job_id, "Job cancelled.")
         _mark_job_cancelled(job_id)
     # pylint: disable=broad-exception-caught
     except Exception as exc:  # pragma: no cover - unexpected failure
-        if standalone:
-            for info_path in info_json_paths:
-                try:
-                    os.remove(info_path)
-                except OSError:
-                    continue
-            _cleanup_directory(standalone_staging_dir)
         fail(f"Unexpected error: {exc}")
     # pylint: enable=broad-exception-caught
     finally:
