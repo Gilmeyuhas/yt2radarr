@@ -39,8 +39,94 @@ document.addEventListener('DOMContentLoaded', () => {
     addMovieCloseButtons: document.querySelectorAll('[data-close-add-movie]'),
     toggleConsoleButton: document.getElementById('toggleConsoleButton'),
     sideColumn: document.getElementById('debugConsoleRegion'),
-    refreshLibraryButton: document.getElementById('refreshLibraryButton')
+    refreshLibraryButton: document.getElementById('refreshLibraryButton'),
+    themeToggleButton: document.getElementById('themeToggleButton'),
+    youtubeSearchButton: document.getElementById('youtubeSearchButton'),
+    youtubeSearchModal: document.getElementById('youtubeSearchModal'),
+    youtubeSearchBackdrop: document.getElementById('youtubeSearchBackdrop'),
+    youtubeSearchCloseButtons: document.querySelectorAll('[data-close-youtube-search]'),
+    youtubeSearchInput: document.getElementById('youtubeSearchInput'),
+    youtubeSearchSubmit: document.getElementById('youtubeSearchSubmit'),
+    youtubeSearchStatus: document.getElementById('youtubeSearchStatus'),
+    youtubeSearchResults: document.getElementById('youtubeSearchResults')
   };
+
+  const THEME_STORAGE_KEY = 'yt2radarr.theme';
+  const systemThemeQuery =
+    typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: light)') : null;
+  const storedTheme = readStoredThemePreference();
+  let userSelectedTheme = storedTheme;
+  let activeTheme = storedTheme || (systemThemeQuery && systemThemeQuery.matches ? 'light' : 'dark');
+
+  applyTheme(activeTheme, { persist: false });
+
+  if (elements.themeToggleButton) {
+    elements.themeToggleButton.addEventListener('click', () => {
+      const nextTheme = activeTheme === 'light' ? 'dark' : 'light';
+      applyTheme(nextTheme);
+    });
+  }
+
+  if (systemThemeQuery) {
+    const handleSystemThemeChange = (event) => {
+      if (userSelectedTheme) {
+        return;
+      }
+      applyTheme(event.matches ? 'light' : 'dark', { persist: false });
+    };
+    if (typeof systemThemeQuery.addEventListener === 'function') {
+      systemThemeQuery.addEventListener('change', handleSystemThemeChange);
+    } else if (typeof systemThemeQuery.addListener === 'function') {
+      systemThemeQuery.addListener(handleSystemThemeChange);
+    }
+  }
+
+  function readStoredThemePreference() {
+    try {
+      const storedValue = window.localStorage.getItem(THEME_STORAGE_KEY);
+      if (storedValue === 'light' || storedValue === 'dark') {
+        return storedValue;
+      }
+    } catch (err) {
+      // Ignore storage errors
+    }
+    return null;
+  }
+
+  function persistThemePreference(value) {
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, value);
+    } catch (err) {
+      // Ignore persistence errors
+    }
+  }
+
+  function updateThemeToggleButton(theme) {
+    if (!elements.themeToggleButton) {
+      return;
+    }
+    const isLight = theme === 'light';
+    elements.themeToggleButton.textContent = isLight ? '🌙 Dark Mode' : '🌞 Light Mode';
+    elements.themeToggleButton.setAttribute('aria-pressed', isLight ? 'true' : 'false');
+    elements.themeToggleButton.setAttribute(
+      'title',
+      isLight ? 'Switch to dark mode' : 'Switch to light mode'
+    );
+  }
+
+  function applyTheme(theme, options = {}) {
+    const { persist = true } = options || {};
+    const normalized = theme === 'light' ? 'light' : 'dark';
+    activeTheme = normalized;
+    if (document.body && document.body.dataset) {
+      document.body.dataset.theme = normalized;
+    }
+    updateThemeToggleButton(normalized);
+    if (persist) {
+      userSelectedTheme = normalized;
+      persistThemePreference(normalized);
+    }
+  }
 
   if (!elements.form) {
     return;
@@ -66,6 +152,7 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   const CANCELLABLE_STATUSES = new Set(['queued', 'processing']);
+  const YOUTUBE_URL_PATTERN = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//i;
 
   const MAX_DOWNLOAD_ENTRIES = 8;
   const POLL_INTERVAL = 1000;
@@ -122,8 +209,29 @@ document.addEventListener('DOMContentLoaded', () => {
       adding: false,
       lastFocusedElement: null,
       query: ''
+    },
+    youtubeSearch: {
+      modalOpen: false,
+      searchTimeout: null,
+      searchToken: 0,
+      loading: false,
+      results: [],
+      selectedIndex: -1,
+      lastFocusedElement: null,
+      query: ''
     }
   };
+
+  function refreshModalOpenState() {
+    if (!document.body) {
+      return;
+    }
+    if (state.addMovie.modalOpen || state.youtubeSearch.modalOpen) {
+      document.body.classList.add('modal-open');
+    } else {
+      document.body.classList.remove('modal-open');
+    }
+  }
 
   const IMPORTANT_LINE_SNIPPETS = [
     'success! video saved',
@@ -656,7 +764,7 @@ document.addEventListener('DOMContentLoaded', () => {
     state.addMovie.lastFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     state.addMovie.searchToken = 0;
     elements.addMovieModal.removeAttribute('hidden');
-    document.body.classList.add('modal-open');
+    refreshModalOpenState();
     resetAddMovieState();
     const query = (initialQuery || '').trim();
     if (elements.addMovieSearchInput) {
@@ -677,9 +785,9 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     elements.addMovieModal.setAttribute('hidden', 'hidden');
-    document.body.classList.remove('modal-open');
-    resetAddMovieState();
     state.addMovie.modalOpen = false;
+    refreshModalOpenState();
+    resetAddMovieState();
     const restoreFocus = options.restoreFocus !== false;
     const lastFocused = state.addMovie.lastFocusedElement;
     state.addMovie.lastFocusedElement = null;
@@ -873,6 +981,318 @@ document.addEventListener('DOMContentLoaded', () => {
       if (elements.addMovieConfirmButton) {
         elements.addMovieConfirmButton.textContent = originalLabel;
       }
+    }
+  }
+
+  function formatYouTubeViewCount(count) {
+    const value = Number(count);
+    if (!Number.isFinite(value) || value < 0) {
+      return '';
+    }
+    const thresholds = [
+      { limit: 1e12, suffix: 'T' },
+      { limit: 1e9, suffix: 'B' },
+      { limit: 1e6, suffix: 'M' },
+      { limit: 1e3, suffix: 'K' }
+    ];
+    for (const { limit, suffix } of thresholds) {
+      if (value >= limit) {
+        const scaled = value / limit;
+        const display = scaled >= 10 ? Math.round(scaled) : Math.round(scaled * 10) / 10;
+        return `${display}${suffix} views`;
+      }
+    }
+    return `${Math.round(value).toLocaleString()} views`;
+  }
+
+  function formatYouTubeDuration(seconds) {
+    const total = Number(seconds);
+    if (!Number.isFinite(total) || total <= 0) {
+      return '';
+    }
+    const wholeSeconds = Math.round(total);
+    const hours = Math.floor(wholeSeconds / 3600);
+    const minutes = Math.floor((wholeSeconds % 3600) / 60);
+    const secs = wholeSeconds % 60;
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+    return `${minutes}:${String(secs).padStart(2, '0')}`;
+  }
+
+  function setYouTubeSearchStatus(message, tone = '') {
+    if (!elements.youtubeSearchStatus) {
+      return;
+    }
+    const status = elements.youtubeSearchStatus;
+    status.textContent = message || '';
+    status.className = 'modal-status';
+    if (tone) {
+      status.classList.add(`is-${tone}`);
+    }
+  }
+
+  function clearYouTubeSearchTimer() {
+    if (state.youtubeSearch.searchTimeout) {
+      clearTimeout(state.youtubeSearch.searchTimeout);
+      state.youtubeSearch.searchTimeout = null;
+    }
+  }
+
+  function resetYouTubeSearchState() {
+    clearYouTubeSearchTimer();
+    state.youtubeSearch.loading = false;
+    state.youtubeSearch.results = [];
+    state.youtubeSearch.selectedIndex = -1;
+    state.youtubeSearch.query = '';
+    state.youtubeSearch.searchToken = 0;
+    setYouTubeSearchStatus('');
+    renderYouTubeSearchResults();
+  }
+
+  function renderYouTubeSearchResults() {
+    if (!elements.youtubeSearchResults) {
+      return;
+    }
+    const list = elements.youtubeSearchResults;
+    const results = Array.isArray(state.youtubeSearch.results) ? state.youtubeSearch.results : [];
+    list.innerHTML = '';
+    if (!results.length) {
+      list.setAttribute('hidden', 'hidden');
+      return;
+    }
+    list.removeAttribute('hidden');
+    results.forEach((video, index) => {
+      const item = document.createElement('li');
+      item.className = 'modal-result';
+      if (index === state.youtubeSearch.selectedIndex) {
+        item.classList.add('is-selected');
+      }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'modal-result-button';
+      button.dataset.index = String(index);
+
+      const title = document.createElement('span');
+      title.className = 'result-title';
+      title.textContent = (video.title || '').trim() || 'YouTube Video';
+      button.appendChild(title);
+
+      const metaParts = [];
+      if (video.uploader) {
+        metaParts.push(video.uploader);
+      }
+      const viewsLabel = formatYouTubeViewCount(video.viewCount);
+      if (viewsLabel) {
+        metaParts.push(viewsLabel);
+      }
+      const durationLabel = formatYouTubeDuration(video.duration);
+      if (durationLabel) {
+        metaParts.push(durationLabel);
+      }
+      if (metaParts.length) {
+        const meta = document.createElement('span');
+        meta.className = 'result-meta';
+        meta.textContent = metaParts.join(' • ');
+        button.appendChild(meta);
+      }
+
+      item.appendChild(button);
+      list.appendChild(item);
+    });
+  }
+
+  function focusYouTubeSearchSelection() {
+    if (!elements.youtubeSearchResults) {
+      return;
+    }
+    const index = state.youtubeSearch.selectedIndex;
+    if (!Number.isInteger(index) || index < 0) {
+      return;
+    }
+    const selector = `.modal-result-button[data-index="${index}"]`;
+    const button = elements.youtubeSearchResults.querySelector(selector);
+    if (button && typeof button.focus === 'function') {
+      button.focus();
+      if (typeof button.scrollIntoView === 'function') {
+        button.scrollIntoView({ block: 'nearest' });
+      }
+    }
+  }
+
+  function changeYouTubeSearchSelection(offset) {
+    const results = Array.isArray(state.youtubeSearch.results) ? state.youtubeSearch.results : [];
+    if (!results.length || !Number.isInteger(offset) || offset === 0) {
+      return;
+    }
+    const current = Number.isInteger(state.youtubeSearch.selectedIndex) && state.youtubeSearch.selectedIndex >= 0
+      ? state.youtubeSearch.selectedIndex
+      : 0;
+    let next = current + offset;
+    if (next < 0) {
+      next = results.length - 1;
+    } else if (next >= results.length) {
+      next = 0;
+    }
+    state.youtubeSearch.selectedIndex = next;
+    renderYouTubeSearchResults();
+    focusYouTubeSearchSelection();
+  }
+
+  function openYouTubeSearchModal(initialQuery = '') {
+    if (!elements.youtubeSearchModal) {
+      return;
+    }
+    state.youtubeSearch.modalOpen = true;
+    state.youtubeSearch.lastFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    state.youtubeSearch.searchToken = 0;
+    elements.youtubeSearchModal.removeAttribute('hidden');
+    refreshModalOpenState();
+    resetYouTubeSearchState();
+    const query = (initialQuery || '').trim();
+    if (elements.youtubeSearchInput) {
+      elements.youtubeSearchInput.value = query;
+      elements.youtubeSearchInput.focus();
+      if (query.length >= 2) {
+        scheduleYouTubeSearch({ immediate: true });
+      } else {
+        setYouTubeSearchStatus('Enter at least 2 characters to search YouTube.', 'info');
+      }
+    } else {
+      setYouTubeSearchStatus('Enter at least 2 characters to search YouTube.', 'info');
+    }
+  }
+
+  function closeYouTubeSearchModal(options = {}) {
+    if (!elements.youtubeSearchModal || !state.youtubeSearch.modalOpen) {
+      return;
+    }
+    elements.youtubeSearchModal.setAttribute('hidden', 'hidden');
+    state.youtubeSearch.modalOpen = false;
+    refreshModalOpenState();
+    const restoreFocus = options.restoreFocus !== false;
+    const lastFocused = state.youtubeSearch.lastFocusedElement;
+    state.youtubeSearch.lastFocusedElement = null;
+    resetYouTubeSearchState();
+    if (restoreFocus && lastFocused && typeof lastFocused.focus === 'function') {
+      lastFocused.focus();
+    }
+  }
+
+  function scheduleYouTubeSearch(options = {}) {
+    if (!elements.youtubeSearchInput) {
+      return;
+    }
+    const query = elements.youtubeSearchInput.value ? elements.youtubeSearchInput.value.trim() : '';
+    state.youtubeSearch.query = query;
+    clearYouTubeSearchTimer();
+    if (!query || query.length < 2) {
+      state.youtubeSearch.results = [];
+      state.youtubeSearch.selectedIndex = -1;
+      renderYouTubeSearchResults();
+      setYouTubeSearchStatus('Enter at least 2 characters to search YouTube.', 'info');
+      return;
+    }
+    if (options.immediate) {
+      performYouTubeSearch(query);
+      return;
+    }
+    state.youtubeSearch.searchTimeout = setTimeout(() => {
+      performYouTubeSearch(query);
+    }, 250);
+  }
+
+  async function performYouTubeSearch(query) {
+    const token = ++state.youtubeSearch.searchToken;
+    state.youtubeSearch.loading = true;
+    setYouTubeSearchStatus('Searching YouTube…', 'info');
+    try {
+      const params = new URLSearchParams({ q: query, limit: '10' });
+      const response = await fetch(`/youtube/search?${params.toString()}`);
+      const data = await response.json().catch(() => ({}));
+      if (token !== state.youtubeSearch.searchToken) {
+        return;
+      }
+      if (!response.ok) {
+        const message = data && data.error ? data.error : `Search failed (HTTP ${response.status}).`;
+        state.youtubeSearch.results = [];
+        state.youtubeSearch.selectedIndex = -1;
+        renderYouTubeSearchResults();
+        setYouTubeSearchStatus(message, 'error');
+        return;
+      }
+      const results = Array.isArray(data.results)
+        ? data.results
+            .map(item => {
+              if (!item || !item.url) {
+                return null;
+              }
+              return {
+                id: item.id || '',
+                title: item.title || 'YouTube Video',
+                url: item.url,
+                uploader: item.uploader || '',
+                viewCount: typeof item.viewCount === 'number' ? item.viewCount : null,
+                duration: typeof item.duration === 'number' ? item.duration : null
+              };
+            })
+            .filter(Boolean)
+        : [];
+      state.youtubeSearch.results = results;
+      state.youtubeSearch.selectedIndex = results.length ? 0 : -1;
+      renderYouTubeSearchResults();
+      if (!results.length) {
+        setYouTubeSearchStatus('No videos matched that search.', 'warning');
+      } else {
+        setYouTubeSearchStatus('Select a result to use its URL.', 'success');
+      }
+    } catch (err) {
+      if (token !== state.youtubeSearch.searchToken) {
+        return;
+      }
+      state.youtubeSearch.results = [];
+      state.youtubeSearch.selectedIndex = -1;
+      renderYouTubeSearchResults();
+      const message = err && err.message ? err.message : err;
+      setYouTubeSearchStatus(`Failed to search YouTube: ${message}`, 'error');
+    } finally {
+      if (token === state.youtubeSearch.searchToken) {
+        state.youtubeSearch.loading = false;
+      }
+    }
+  }
+
+  function selectYouTubeSearchResult(index) {
+    const results = Array.isArray(state.youtubeSearch.results) ? state.youtubeSearch.results : [];
+    const numericIndex = Number(index);
+    if (!Number.isInteger(numericIndex) || numericIndex < 0 || numericIndex >= results.length) {
+      return;
+    }
+    state.youtubeSearch.selectedIndex = numericIndex;
+    renderYouTubeSearchResults();
+    applyYouTubeSearchSelection(results[numericIndex]);
+  }
+
+  function applyYouTubeSearchSelection(video) {
+    if (!video || !elements.ytInput) {
+      return;
+    }
+    const url = video.url && typeof video.url === 'string' ? video.url.trim() : '';
+    if (!url) {
+      setYouTubeSearchStatus('Unable to use that result because it does not include a URL.', 'error');
+      return;
+    }
+    elements.ytInput.value = url;
+    try {
+      const inputEvent = new Event('input', { bubbles: true });
+      elements.ytInput.dispatchEvent(inputEvent);
+    } catch (err) {
+      // Ignore event dispatch failures (e.g., older browsers)
+    }
+    closeYouTubeSearchModal({ restoreFocus: false });
+    elements.ytInput.focus();
+    if (typeof elements.ytInput.select === 'function') {
+      elements.ytInput.select();
     }
   }
 
@@ -1498,6 +1918,87 @@ document.addEventListener('DOMContentLoaded', () => {
   initialiseMovieNotFoundPrompt();
   syncMovieSelection();
 
+  if (elements.youtubeSearchButton) {
+    elements.youtubeSearchButton.addEventListener('click', () => {
+      const currentValue = elements.ytInput ? elements.ytInput.value.trim() : '';
+      const initialQuery = currentValue && !YOUTUBE_URL_PATTERN.test(currentValue) ? currentValue : '';
+      openYouTubeSearchModal(initialQuery);
+    });
+  }
+
+  if (elements.youtubeSearchBackdrop) {
+    elements.youtubeSearchBackdrop.addEventListener('click', () => {
+      closeYouTubeSearchModal();
+    });
+  }
+
+  if (elements.youtubeSearchCloseButtons && typeof elements.youtubeSearchCloseButtons.forEach === 'function') {
+    elements.youtubeSearchCloseButtons.forEach(button => {
+      button.addEventListener('click', () => {
+        closeYouTubeSearchModal();
+      });
+    });
+  }
+
+  if (elements.youtubeSearchInput) {
+    elements.youtubeSearchInput.addEventListener('input', () => {
+      scheduleYouTubeSearch();
+    });
+    elements.youtubeSearchInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const results = Array.isArray(state.youtubeSearch.results) ? state.youtubeSearch.results : [];
+        if (results.length && state.youtubeSearch.selectedIndex >= 0) {
+          selectYouTubeSearchResult(state.youtubeSearch.selectedIndex);
+        } else {
+          scheduleYouTubeSearch({ immediate: true });
+        }
+      } else if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        changeYouTubeSearchSelection(1);
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        changeYouTubeSearchSelection(-1);
+      }
+    });
+  }
+
+  if (elements.youtubeSearchSubmit) {
+    elements.youtubeSearchSubmit.addEventListener('click', () => {
+      scheduleYouTubeSearch({ immediate: true });
+    });
+  }
+
+  if (elements.youtubeSearchResults) {
+    elements.youtubeSearchResults.addEventListener('click', event => {
+      const button = event.target instanceof Element ? event.target.closest('.modal-result-button') : null;
+      if (!button) {
+        return;
+      }
+      const index = button.dataset ? button.dataset.index : null;
+      if (index === null || index === undefined) {
+        return;
+      }
+      event.preventDefault();
+      selectYouTubeSearchResult(Number(index));
+    });
+    elements.youtubeSearchResults.addEventListener('keydown', event => {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        changeYouTubeSearchSelection(1);
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        changeYouTubeSearchSelection(-1);
+      } else if (event.key === 'Enter') {
+        const button = event.target instanceof Element ? event.target.closest('.modal-result-button') : null;
+        if (button && button.dataset && button.dataset.index !== undefined) {
+          event.preventDefault();
+          selectYouTubeSearchResult(Number(button.dataset.index));
+        }
+      }
+    });
+  }
+
   if (elements.addMovieBackdrop) {
     elements.addMovieBackdrop.addEventListener('click', () => {
       closeAddMovieModal();
@@ -1548,7 +2049,15 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   document.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && state.addMovie.modalOpen) {
+    if (event.key !== 'Escape') {
+      return;
+    }
+    if (state.youtubeSearch.modalOpen) {
+      event.preventDefault();
+      closeYouTubeSearchModal();
+      return;
+    }
+    if (state.addMovie.modalOpen) {
       event.preventDefault();
       closeAddMovieModal();
     }
@@ -1678,11 +2187,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const errors = [];
     if (!payload.yturl) {
       errors.push('YouTube URL is required.');
-    } else {
-      const ytPattern = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//i;
-      if (!ytPattern.test(payload.yturl)) {
-        errors.push('Please enter a valid YouTube URL.');
-      }
+    } else if (!YOUTUBE_URL_PATTERN.test(payload.yturl)) {
+      errors.push('Please enter a valid YouTube URL.');
     }
     if (!payload.movieId && !payload.standalone) {
       errors.push('Please select a valid movie from the list.');

@@ -29,6 +29,15 @@
       <div class="header-actions">
         <button
           type="button"
+          id="themeToggleButton"
+          class="button-secondary theme-toggle-button"
+          aria-pressed="false"
+          title="Switch to light mode"
+        >
+          🌞 Light Mode
+        </button>
+        <button
+          type="button"
           id="toggleConsoleButton"
           class="button-secondary toggle-console-button"
           aria-controls="debugConsoleRegion"
@@ -45,14 +54,19 @@
         <form id="movieForm" novalidate>
           <div class="form-group">
             <label for="yturl">YouTube URL</label>
-            <input
-              type="url"
-              id="yturl"
-              name="yturl"
-              placeholder="https://www.youtube.com/watch?v=..."
-              pattern="^(https?:\\/\\/)?(www\\.)?(youtube\\.com|youtu\\.be)\\/.*$"
-              required
-            />
+            <div class="youtube-input-wrapper">
+              <input
+                type="url"
+                id="yturl"
+                name="yturl"
+                placeholder="https://www.youtube.com/watch?v=..."
+                pattern="^(https?:\\/\\/)?(www\\.)?(youtube\\.com|youtu\\.be)\\/.*$"
+                required
+              />
+              <button type="button" class="button-secondary" id="youtubeSearchButton">
+                Search YouTube
+              </button>
+            </div>
           </div>
 
           <div class="form-group">
@@ -257,6 +271,57 @@
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="youtubeSearchModal" class="modal" hidden>
+    <div
+      class="modal-backdrop"
+      id="youtubeSearchBackdrop"
+      data-close-youtube-search="true"
+    ></div>
+    <div
+      class="modal-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="youtubeSearchTitle"
+    >
+      <div class="modal-header">
+        <h3 id="youtubeSearchTitle">Search YouTube</h3>
+        <button
+          type="button"
+          class="button-ghost close-button"
+          data-close-youtube-search="true"
+          aria-label="Close"
+        >
+          ×
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-search">
+          <label for="youtubeSearchInput">Search for a video</label>
+          <div class="modal-search-input">
+            <input
+              type="text"
+              id="youtubeSearchInput"
+              name="youtubeSearchInput"
+              placeholder="Enter at least 2 characters"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button type="button" class="button-secondary" id="youtubeSearchSubmit">
+              Search
+            </button>
+          </div>
+        </div>
+        <div
+          id="youtubeSearchStatus"
+          class="modal-status"
+          role="status"
+          aria-live="polite"
+        ></div>
+        <ul id="youtubeSearchResults" class="modal-results" hidden></ul>
       </div>
     </div>
   </div>

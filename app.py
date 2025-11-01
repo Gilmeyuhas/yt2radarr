@@ -2,6 +2,7 @@
 
 # pylint: disable=too-many-lines
 
+import itertools
 import json
 import os
 import re
@@ -13,7 +14,8 @@ import time
 import uuid
 import selectors
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from glob import glob as glob_paths
 
@@ -27,6 +29,9 @@ from flask import (  # pylint: disable=import-error
     request,
     url_for,
 )
+from yt_dlp import YoutubeDL  # pylint: disable=import-error
+from yt_dlp.extractor.youtube import YoutubeSearchIE  # pylint: disable=import-error
+from yt_dlp.utils import YoutubeDLError  # pylint: disable=import-error
 
 from jobs import JobRepository
 
@@ -73,6 +78,24 @@ YTDLP_FORMAT_SELECTOR = (
 METADATA_FETCH_TIMEOUT_SECONDS = 120
 
 
+
+YOUTUBE_SEARCH_MAX_RESULTS = 20
+YOUTUBE_SEARCH_CACHE_TTL = 90.0
+
+_YOUTUBE_SEARCH_CACHE: Dict[Tuple[str, int], Tuple[float, List[Dict[str, Any]]]] = {}
+_YOUTUBE_SEARCH_LOCK = threading.Lock()
+
+YOUTUBE_SEARCH_DL_OPTIONS = {
+    "quiet": True,
+    "skip_download": True,
+    "extract_flat": True,
+    "noplaylist": True,
+    "cachedir": False,
+    "socket_timeout": 10,
+    "retries": 1,
+    "extractor_retries": 0,
+    "nocheckcertificate": True,
+}
 def _format_filesize(value: Optional[float]) -> str:
     """Return a human-readable string for a byte size."""
 
@@ -201,6 +224,109 @@ def _cleanup_temp_files(pattern: Optional[str]) -> None:
                 os.remove(leftover)
             except OSError:
                 continue
+
+
+def _normalise_youtube_result(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Convert a YouTube search entry into the structure expected by the UI."""
+
+    url = entry.get("url")
+    if not url:
+        video_id = entry.get("id")
+        if isinstance(video_id, str):
+            url = f"https://www.youtube.com/watch?v={video_id}"
+    if not url:
+        return None
+
+    view_count = entry.get("view_count")
+    if view_count is None:
+        view_count = entry.get("concurrent_view_count")
+
+    return {
+        "id": entry.get("id"),
+        "title": entry.get("title"),
+        "url": url,
+        "uploader": entry.get("uploader") or entry.get("channel"),
+        "viewCount": view_count,
+        "duration": entry.get("duration"),
+    }
+
+
+def _iter_youtube_entries(playlist: Any) -> Iterable[Dict[str, Any]]:
+    """Yield raw entries from a YouTube search playlist result."""
+
+    if not isinstance(playlist, dict):
+        return ()
+    entries = playlist.get("entries")
+    if not isinstance(entries, Iterable) or isinstance(entries, (str, bytes)):
+        return ()
+    return entries
+
+
+def _get_cached_youtube_results(
+    cache_key: Tuple[str, int], now: float
+) -> Optional[List[Dict[str, Any]]]:
+    """Return cached YouTube search results if they are still fresh."""
+
+    with _YOUTUBE_SEARCH_LOCK:
+        cached = _YOUTUBE_SEARCH_CACHE.get(cache_key)
+        if cached and now - cached[0] < YOUTUBE_SEARCH_CACHE_TTL:
+            return [dict(item) for item in cached[1]]
+    return None
+
+
+def _store_youtube_results(
+    cache_key: Tuple[str, int], now: float, results: List[Dict[str, Any]]
+) -> None:
+    """Persist a YouTube search result set and purge stale cache entries."""
+
+    snapshot = [dict(item) for item in results]
+    with _YOUTUBE_SEARCH_LOCK:
+        _YOUTUBE_SEARCH_CACHE[cache_key] = (now, snapshot)
+        stale_keys = [
+            key
+            for key, (timestamp, _) in list(_YOUTUBE_SEARCH_CACHE.items())
+            if now - timestamp >= YOUTUBE_SEARCH_CACHE_TTL
+        ]
+        for stale_key in stale_keys:
+            _YOUTUBE_SEARCH_CACHE.pop(stale_key, None)
+
+
+def _search_youtube(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Return metadata for the top YouTube matches for the provided query."""
+
+    search_terms = query.strip()
+    if not search_terms:
+        return []
+    try:
+        max_results = int(limit or 1)
+    except (TypeError, ValueError):
+        max_results = 1
+    max_results = max(1, min(max_results, YOUTUBE_SEARCH_MAX_RESULTS))
+    cache_key = (search_terms.lower(), max_results)
+    now = time.monotonic()
+    cached = _get_cached_youtube_results(cache_key, now)
+    if cached is not None:
+        return cached
+
+    try:
+        downloader = YoutubeDL(YOUTUBE_SEARCH_DL_OPTIONS.copy())
+        searcher = YoutubeSearchIE(downloader)
+        playlist = searcher.extract(f"ytsearch{max_results}:{search_terms}")
+    except YoutubeDLError as exc:
+        raise RuntimeError(f"YouTube search failed: {exc}") from exc
+    except Exception as exc:  # pragma: no cover - defensive, constructor shouldn't fail
+        raise RuntimeError(f"Failed to initialise YouTube search: {exc}") from exc
+
+    results: List[Dict[str, Any]] = []
+    for entry in itertools.islice(_iter_youtube_entries(playlist), max_results):
+        if not isinstance(entry, dict):
+            continue
+        normalised = _normalise_youtube_result(downloader.sanitize_info(entry))
+        if normalised is not None:
+            results.append(normalised)
+
+    _store_youtube_results(cache_key, now, results)
+    return results
 
 
 def _cleanup_playlist_dir(path: Optional[str]) -> None:
@@ -997,6 +1123,30 @@ def _format_quality_profile(entry: Dict[str, Any]) -> Dict[str, Any]:
         "id": entry.get("id"),
         "name": entry.get("name") or f"Profile {entry.get('id')}",
     }
+
+
+@app.route("/youtube/search", methods=["GET"])
+def youtube_search() -> Response:
+    """Search for YouTube videos matching the supplied query."""
+
+    query = (request.args.get("q") or "").strip()
+    if len(query) < 2:
+        return (
+            jsonify({"error": "Please provide a search query with at least 2 characters."}),
+            400,
+        )
+
+    limit_value = request.args.get("limit", default=10, type=int)
+    if limit_value is None:
+        limit_value = 10
+
+    try:
+        results = _search_youtube(query, limit=limit_value)
+    except RuntimeError as exc:
+        app.logger.error("Failed to search YouTube for query %r: %s", query, exc)
+        return jsonify({"error": "Failed to search YouTube."}), 502
+
+    return jsonify({"results": results})
 
 
 @app.route("/radarr/options", methods=["GET"])
