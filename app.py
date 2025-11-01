@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -68,6 +69,217 @@ def _format_filesize(value: Optional[float]) -> str:
         size /= 1024
         unit_index += 1
     return f"{size:.1f} {units[unit_index]}"
+
+
+def _format_duration(value: Optional[Any]) -> str:
+    """Return a human-readable duration string for seconds."""
+
+    if value is None:
+        return ""
+    total_seconds: Optional[int]
+    if isinstance(value, (int, float)):
+        total_seconds = int(value)
+    else:
+        try:
+            total_seconds = int(float(value))
+        except (TypeError, ValueError):
+            total_seconds = None
+    if total_seconds is None or total_seconds < 0:
+        return ""
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:d}:{seconds:02d}"
+
+
+def _format_upload_date(value: Optional[str]) -> str:
+    """Return a YYYY-MM-DD string from a YouTube upload date."""
+
+    if not value:
+        return ""
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if len(digits) != 8:
+        return ""
+    year = digits[0:4]
+    month = digits[4:6]
+    day = digits[6:8]
+    return f"{year}-{month}-{day}"
+
+
+def _select_thumbnail(thumbnails: Any) -> str:
+    """Return the highest quality thumbnail URL from yt-dlp data."""
+
+    if not isinstance(thumbnails, list):
+        return ""
+    best_url = ""
+    best_score = -1
+    for thumb in thumbnails:
+        if not isinstance(thumb, dict):
+            continue
+        url = str(thumb.get("url") or thumb.get("thumbnail") or "").strip()
+        if not url:
+            continue
+        width = thumb.get("width")
+        height = thumb.get("height")
+        score = 0
+        if isinstance(width, (int, float)) and isinstance(height, (int, float)):
+            score = int(width) * int(height)
+        elif isinstance(width, (int, float)):
+            score = int(width)
+        elif isinstance(height, (int, float)):
+            score = int(height)
+        if score >= best_score:
+            best_score = score
+            best_url = url
+    return best_url
+
+
+def _normalise_search_query(value: str) -> str:
+    """Normalise a search query for cache lookups."""
+
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def _normalise_youtube_result(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Transform a yt-dlp search entry into a response payload."""
+
+    if not isinstance(entry, dict):
+        return None
+
+    url = (
+        str(entry.get("webpage_url") or "").strip()
+        or str(entry.get("url") or "").strip()
+    )
+    if not url:
+        return None
+
+    title = str(entry.get("title") or "Untitled").strip()
+    channel = str(entry.get("channel") or entry.get("uploader") or "").strip()
+    duration_text = _format_duration(entry.get("duration"))
+    uploaded_text = _format_upload_date(entry.get("upload_date"))
+
+    view_count = entry.get("view_count")
+    views_text = ""
+    if isinstance(view_count, (int, float)) and view_count >= 0:
+        views_text = f"{int(view_count):,} views"
+
+    thumbnail = _select_thumbnail(entry.get("thumbnails"))
+
+    return {
+        "title": title,
+        "url": url,
+        "channel": channel,
+        "duration": duration_text,
+        "uploaded": uploaded_text,
+        "views": views_text,
+        "thumbnail": thumbnail,
+    }
+
+
+def _parse_youtube_search_output(output: str) -> List[Dict[str, Any]]:
+    """Parse newline-delimited JSON output from yt-dlp search."""
+
+    results: List[Dict[str, Any]] = []
+    if not output:
+        return results
+    for line in output.splitlines():
+        data = line.strip()
+        if not data:
+            continue
+        try:
+            parsed = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        if parsed.get("_type") == "playlist":
+            for entry in parsed.get("entries", []) or []:
+                normalised = _normalise_youtube_result(entry)
+                if normalised:
+                    results.append(normalised)
+        else:
+            normalised = _normalise_youtube_result(parsed)
+            if normalised:
+                results.append(normalised)
+    return results
+
+
+def _prune_youtube_search_cache(now: Optional[float] = None) -> None:
+    """Trim expired or excess cache entries."""
+
+    if now is None:
+        now = time.time()
+
+    expired_keys = [
+        key
+        for key, (timestamp, _results) in list(_YOUTUBE_SEARCH_CACHE.items())
+        if now - timestamp > _YOUTUBE_SEARCH_CACHE_TTL_SECONDS
+    ]
+    for key in expired_keys:
+        _YOUTUBE_SEARCH_CACHE.pop(key, None)
+
+    if len(_YOUTUBE_SEARCH_CACHE) <= _YOUTUBE_SEARCH_CACHE_MAX_ENTRIES:
+        return
+
+    sorted_items = sorted(
+        _YOUTUBE_SEARCH_CACHE.items(),
+        key=lambda item: item[1][0],
+    )
+    excess = len(_YOUTUBE_SEARCH_CACHE) - _YOUTUBE_SEARCH_CACHE_MAX_ENTRIES
+    for idx in range(excess):
+        key = sorted_items[idx][0]
+        _YOUTUBE_SEARCH_CACHE.pop(key, None)
+
+
+def _search_youtube(query: str, limit: int) -> Tuple[List[Dict[str, Any]], bool]:
+    """Search YouTube via yt-dlp and return a tuple of (results, cached?)."""
+
+    if limit <= 0:
+        return [], False
+
+    normalised_query = _normalise_search_query(query)
+    cache_key = (normalised_query, limit)
+    now = time.time()
+    cached = _YOUTUBE_SEARCH_CACHE.get(cache_key)
+    if cached and now - cached[0] <= _YOUTUBE_SEARCH_CACHE_TTL_SECONDS:
+        return list(cached[1]), True
+
+    _prune_youtube_search_cache(now)
+
+    command = [
+        "yt-dlp",
+        "--ignore-config",
+        "--no-warnings",
+        "--dump-json",
+        f"ytsearch{limit}:{query}",
+    ]
+
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_YOUTUBE_SEARCH_PROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("YouTube search timed out") from exc
+    except OSError as exc:
+        raise RuntimeError("Failed to invoke yt-dlp for search") from exc
+
+    if completed.returncode not in (0, 1):
+        stderr = (completed.stderr or "").strip()
+        raise RuntimeError(stderr or "YouTube search failed")
+
+    results = _parse_youtube_search_output(completed.stdout or "")
+    if not isinstance(results, list):
+        results = []
+    results = results[:limit]
+
+    _YOUTUBE_SEARCH_CACHE[cache_key] = (now, list(results))
+    _prune_youtube_search_cache(now)
+    return results, False
 def _default_config() -> Dict:
     return {
         "radarr_url": (os.environ.get("RADARR_URL") or "").rstrip("/"),
@@ -80,6 +292,13 @@ def _default_config() -> Dict:
 
 
 _CACHE: Dict[str, Optional[Any]] = {"config": None, "movies": None}
+
+_YOUTUBE_SEARCH_CACHE: Dict[Tuple[str, int], Tuple[float, List[Dict[str, Any]]]] = {}
+_YOUTUBE_SEARCH_CACHE_TTL_SECONDS = 300
+_YOUTUBE_SEARCH_CACHE_MAX_ENTRIES = 32
+_YOUTUBE_SEARCH_MIN_QUERY_LENGTH = 3
+
+_YOUTUBE_SEARCH_PROCESS_TIMEOUT = 25
 
 jobs_repo = JobRepository(JOBS_PATH, max_items=50)
 
@@ -1886,6 +2105,29 @@ def jobs_index():
             "debug_mode": config.get("debug_mode", False),
         }
     )
+
+
+@app.route("/youtube/search", methods=["GET"])
+def youtube_search() -> Response:
+    """Search YouTube via yt-dlp and return results suitable for the UI."""
+
+    query = (request.args.get("q") or "").strip()
+    if len(query) < _YOUTUBE_SEARCH_MIN_QUERY_LENGTH:
+        return jsonify({"error": "Query too short."}), 400
+
+    limit = request.args.get("limit", default=6, type=int) or 6
+    limit = max(1, min(12, int(limit)))
+
+    try:
+        results, cached = _search_youtube(query, limit)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc) or "Search failed."}), 500
+
+    payload = {
+        "results": results,
+        "cached": cached,
+    }
+    return jsonify(payload)
 
 
 @app.route("/jobs/<job_id>", methods=["GET"])

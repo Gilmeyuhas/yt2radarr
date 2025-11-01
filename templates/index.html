@@ -44,6 +44,29 @@
       <div class="main-column">
         <form id="movieForm" novalidate>
           <div class="form-group">
+            <label for="ytSearch">Search YouTube</label>
+            <div class="yt-search-controls">
+              <input
+                type="search"
+                id="ytSearch"
+                name="ytSearch"
+                placeholder="Search for a video title or keywords"
+                autocomplete="off"
+              />
+              <button type="button" id="ytSearchButton">Search</button>
+            </div>
+            <div
+              class="yt-search-feedback"
+              id="ytSearchFeedback"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></div>
+          </div>
+
+          <div id="ytSearchResults" class="yt-search-results" hidden></div>
+
+          <div class="form-group">
             <label for="yturl">YouTube URL</label>
             <input
               type="url"

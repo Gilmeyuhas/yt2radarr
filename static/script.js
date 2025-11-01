@@ -2,6 +2,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const elements = {
     form: document.getElementById('movieForm'),
     ytInput: document.getElementById('yturl'),
+    ytSearchInput: document.getElementById('ytSearch'),
+    ytSearchButton: document.getElementById('ytSearchButton'),
+    ytSearchFeedback: document.getElementById('ytSearchFeedback'),
+    ytSearchResults: document.getElementById('ytSearchResults'),
     movieNameInput: document.getElementById('movieName'),
     movieOptions: document.getElementById('movieOptions'),
     movieIdInput: document.getElementById('movieId'),
@@ -99,6 +103,13 @@ document.addEventListener('DOMContentLoaded', () => {
     copyFeedbackTimeout: null,
     selectedJobId: null,
     activeConsoleJobId: null,
+    youtubeSearch: {
+      timeout: null,
+      token: 0,
+      controller: null,
+      loading: false,
+      results: [],
+    },
     addMovie: {
       modalOpen: false,
       searchTimeout: null,
@@ -132,6 +143,12 @@ document.addEventListener('DOMContentLoaded', () => {
   ];
 
   const COPY_BUTTON_DEFAULT_LABEL = 'Copy Full Log';
+  const YT_SEARCH_MIN_QUERY_LENGTH = 3;
+  const YT_SEARCH_DEBOUNCE_MS = 400;
+  const YT_SEARCH_RESULT_LIMIT = 6;
+  const YT_SEARCH_BUTTON_DEFAULT_LABEL = elements.ytSearchButton
+    ? (elements.ytSearchButton.textContent || 'Search').trim() || 'Search'
+    : 'Search';
 
   function clearCopyFeedbackTimer() {
     if (state.copyFeedbackTimeout) {
@@ -151,6 +168,245 @@ document.addEventListener('DOMContentLoaded', () => {
       elements.copyButton.disabled = false;
     } else {
       elements.copyButton.setAttribute('hidden', 'hidden');
+    }
+  }
+
+  function clearYouTubeSearchTimer() {
+    if (state.youtubeSearch.timeout) {
+      clearTimeout(state.youtubeSearch.timeout);
+      state.youtubeSearch.timeout = null;
+    }
+  }
+
+  function abortYouTubeSearch() {
+    const controller = state.youtubeSearch.controller;
+    if (controller && typeof controller.abort === 'function') {
+      try {
+        controller.abort();
+      } catch (err) {
+        // Ignore abort errors
+      }
+    }
+    state.youtubeSearch.controller = null;
+  }
+
+  function setYouTubeSearchLoading(loading) {
+    const isLoading = Boolean(loading);
+    state.youtubeSearch.loading = isLoading;
+    if (elements.ytSearchButton) {
+      elements.ytSearchButton.disabled = isLoading;
+      elements.ytSearchButton.textContent = isLoading
+        ? 'Searching…'
+        : YT_SEARCH_BUTTON_DEFAULT_LABEL;
+    }
+  }
+
+  function setYouTubeSearchFeedback(message, type) {
+    if (!elements.ytSearchFeedback) {
+      return;
+    }
+    if (!message) {
+      elements.ytSearchFeedback.textContent = '';
+      elements.ytSearchFeedback.hidden = true;
+      if (elements.ytSearchFeedback.dataset) {
+        delete elements.ytSearchFeedback.dataset.state;
+      }
+      return;
+    }
+    elements.ytSearchFeedback.hidden = false;
+    elements.ytSearchFeedback.textContent = message;
+    if (elements.ytSearchFeedback.dataset) {
+      if (type) {
+        elements.ytSearchFeedback.dataset.state = type;
+      } else {
+        delete elements.ytSearchFeedback.dataset.state;
+      }
+    }
+  }
+
+  function renderYouTubeSearchResults() {
+    if (!elements.ytSearchResults) {
+      return;
+    }
+    const results = Array.isArray(state.youtubeSearch.results)
+      ? state.youtubeSearch.results
+      : [];
+    elements.ytSearchResults.innerHTML = '';
+    if (!results.length) {
+      elements.ytSearchResults.hidden = true;
+      return;
+    }
+    results.forEach((result, index) => {
+      if (!result || !result.url) {
+        return;
+      }
+      const wrapper = document.createElement('div');
+      wrapper.className = 'yt-search-result';
+
+      if (result.thumbnail) {
+        const thumbnail = document.createElement('img');
+        thumbnail.src = result.thumbnail;
+        thumbnail.alt = `Thumbnail for ${result.title}`;
+        thumbnail.className = 'yt-search-result-thumbnail';
+        wrapper.appendChild(thumbnail);
+      }
+
+      const details = document.createElement('div');
+      details.className = 'yt-search-result-details';
+
+      const title = document.createElement('p');
+      title.className = 'yt-search-result-title';
+      title.textContent = result.title || 'Untitled';
+      details.appendChild(title);
+
+      const meta = document.createElement('div');
+      meta.className = 'yt-search-result-meta';
+      if (result.channel) {
+        const channel = document.createElement('span');
+        channel.textContent = result.channel;
+        meta.appendChild(channel);
+      }
+      if (result.duration) {
+        const duration = document.createElement('span');
+        duration.textContent = result.duration;
+        meta.appendChild(duration);
+      }
+      if (result.uploaded) {
+        const uploaded = document.createElement('span');
+        uploaded.textContent = result.uploaded;
+        meta.appendChild(uploaded);
+      }
+      if (result.views) {
+        const views = document.createElement('span');
+        views.textContent = result.views;
+        meta.appendChild(views);
+      }
+      details.appendChild(meta);
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'button-secondary';
+      button.textContent = 'Use URL';
+      button.dataset.index = String(index);
+      details.appendChild(button);
+
+      wrapper.appendChild(details);
+      elements.ytSearchResults.appendChild(wrapper);
+    });
+    elements.ytSearchResults.hidden = false;
+  }
+
+  function clearYouTubeSearchResults() {
+    state.youtubeSearch.results = [];
+    renderYouTubeSearchResults();
+  }
+
+  function selectYouTubeSearchResult(index) {
+    if (!Number.isInteger(index)) {
+      return;
+    }
+    const results = Array.isArray(state.youtubeSearch.results)
+      ? state.youtubeSearch.results
+      : [];
+    const result = results[index];
+    if (!result || !result.url || !elements.ytInput) {
+      return;
+    }
+    elements.ytInput.value = result.url;
+    elements.ytInput.dispatchEvent(new Event('input', { bubbles: true }));
+    elements.ytInput.focus();
+  }
+
+  async function performYouTubeSearch(query, token) {
+    if (!query || query.length < YT_SEARCH_MIN_QUERY_LENGTH) {
+      clearYouTubeSearchResults();
+      setYouTubeSearchFeedback('Enter at least 3 characters to search YouTube.', 'info');
+      return;
+    }
+
+    abortYouTubeSearch();
+    setYouTubeSearchLoading(true);
+    setYouTubeSearchFeedback('Searching YouTube…');
+
+    const controller = typeof AbortController !== 'undefined'
+      ? new AbortController()
+      : null;
+    state.youtubeSearch.controller = controller;
+
+    const params = new URLSearchParams({
+      q: query,
+      limit: String(YT_SEARCH_RESULT_LIMIT),
+    });
+
+    try {
+      const response = await fetch(`/youtube/search?${params.toString()}`, {
+        signal: controller ? controller.signal : undefined,
+      });
+      if (token !== state.youtubeSearch.token) {
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      const results = Array.isArray(data.results) ? data.results : [];
+      state.youtubeSearch.results = results;
+      if (!results.length) {
+        setYouTubeSearchFeedback('No results found for that query.', 'warning');
+      } else if (data.cached) {
+        setYouTubeSearchFeedback('Showing cached results.', 'success');
+      } else {
+        setYouTubeSearchFeedback('Search complete.', 'success');
+      }
+      renderYouTubeSearchResults();
+    } catch (err) {
+      if (token !== state.youtubeSearch.token) {
+        return;
+      }
+      const isAbort = err && err.name === 'AbortError';
+      if (!isAbort) {
+        setYouTubeSearchFeedback(
+          `Failed to search YouTube: ${err && err.message ? err.message : err}`,
+          'error',
+        );
+        clearYouTubeSearchResults();
+      }
+    } finally {
+      if (token === state.youtubeSearch.token) {
+        setYouTubeSearchLoading(false);
+        state.youtubeSearch.controller = null;
+      }
+    }
+  }
+
+  function scheduleYouTubeSearch(options = {}) {
+    if (!elements.ytSearchInput) {
+      return;
+    }
+    const immediate = Boolean(options.immediate);
+    clearYouTubeSearchTimer();
+    const query = elements.ytSearchInput.value ? elements.ytSearchInput.value.trim() : '';
+    if (immediate) {
+      state.youtubeSearch.token += 1;
+      performYouTubeSearch(query, state.youtubeSearch.token);
+      return;
+    }
+    state.youtubeSearch.timeout = setTimeout(() => {
+      state.youtubeSearch.timeout = null;
+      state.youtubeSearch.token += 1;
+      performYouTubeSearch(query, state.youtubeSearch.token);
+    }, YT_SEARCH_DEBOUNCE_MS);
+  }
+
+  function handleYouTubeUrlInputChange() {
+    if (!elements.ytInput) {
+      return;
+    }
+    const value = elements.ytInput.value ? elements.ytInput.value.trim() : '';
+    if (!value && elements.ytSearchInput) {
+      elements.ytSearchInput.value = '';
+      setYouTubeSearchFeedback('');
+      clearYouTubeSearchResults();
     }
   }
 
@@ -1216,6 +1472,49 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (err) {
       appendConsoleLine(`ERROR: Failed to load job history: ${err && err.message ? err.message : err}`, 'error');
     }
+  }
+
+  if (elements.ytSearchInput) {
+    elements.ytSearchInput.addEventListener('input', () => {
+      scheduleYouTubeSearch();
+    });
+    elements.ytSearchInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        scheduleYouTubeSearch({ immediate: true });
+      }
+    });
+  }
+
+  if (elements.ytSearchButton) {
+    elements.ytSearchButton.addEventListener('click', () => {
+      scheduleYouTubeSearch({ immediate: true });
+    });
+  }
+
+  if (elements.ytSearchResults) {
+    elements.ytSearchResults.addEventListener('click', event => {
+      const button = event.target instanceof Element
+        ? event.target.closest('button[data-index]')
+        : null;
+      if (!button) {
+        return;
+      }
+      const value = button.dataset.index;
+      if (value === undefined) {
+        return;
+      }
+      const index = Number(value);
+      if (!Number.isInteger(index)) {
+        return;
+      }
+      event.preventDefault();
+      selectYouTubeSearchResult(index);
+    });
+  }
+
+  if (elements.ytInput) {
+    elements.ytInput.addEventListener('input', handleYouTubeUrlInputChange);
   }
 
   if (elements.movieNameInput) {
