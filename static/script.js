@@ -9,6 +9,11 @@ document.addEventListener('DOMContentLoaded', () => {
     yearInput: document.getElementById('year'),
     tmdbInput: document.getElementById('tmdb'),
     extraCheckbox: document.getElementById('extra'),
+    standaloneCheckbox: document.getElementById('standalone'),
+    standaloneNamingOptions: document.getElementById('standaloneNamingOptions'),
+    standaloneCustomToggle: document.getElementById('standaloneCustomNameToggle'),
+    standaloneCustomGroup: document.getElementById('standaloneCustomNameGroup'),
+    standaloneCustomInput: document.getElementById('standaloneCustomName'),
     playlistModeSelect: document.getElementById('playlistMode'),
     extraTypeSelect: document.getElementById('extraType'),
     extraFields: document.getElementById('extraFields'),
@@ -126,6 +131,8 @@ document.addEventListener('DOMContentLoaded', () => {
     'treating video as main video file',
     'storing video in subfolder',
     'created movie folder',
+    'created standalone folder',
+    'standalone folder resolved',
     'fetching radarr details',
     'resolved youtube format'
   ];
@@ -310,6 +317,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!elements.movieNotFoundPrompt || !elements.movieNameInput) {
       return;
     }
+    if (isStandaloneEnabled()) {
+      elements.movieNotFoundPrompt.setAttribute('hidden', 'hidden');
+      return;
+    }
     const value = elements.movieNameInput.value ? elements.movieNameInput.value.trim() : '';
     const hasValue = Boolean(value);
     const option = hasValue ? findMatchingMovieOption(value) : null;
@@ -317,6 +328,98 @@ document.addEventListener('DOMContentLoaded', () => {
       elements.movieNotFoundPrompt.setAttribute('hidden', 'hidden');
     } else {
       elements.movieNotFoundPrompt.removeAttribute('hidden');
+    }
+  }
+
+  function isStandaloneEnabled() {
+    return elements.standaloneCheckbox ? elements.standaloneCheckbox.checked : false;
+  }
+
+  function isStandaloneCustomNameEnabled() {
+    if (!isStandaloneEnabled()) {
+      return false;
+    }
+    return elements.standaloneCustomToggle
+      ? elements.standaloneCustomToggle.checked
+      : false;
+  }
+
+  function updateStandaloneCustomNameState() {
+    const customEnabled = isStandaloneCustomNameEnabled();
+    if (elements.standaloneCustomGroup) {
+      if (customEnabled) {
+        elements.standaloneCustomGroup.removeAttribute('hidden');
+      } else {
+        elements.standaloneCustomGroup.setAttribute('hidden', 'hidden');
+      }
+    }
+    if (elements.standaloneCustomInput) {
+      elements.standaloneCustomInput.disabled = !customEnabled;
+      if (customEnabled) {
+        elements.standaloneCustomInput.setAttribute('required', 'required');
+      } else {
+        elements.standaloneCustomInput.removeAttribute('required');
+        if (!isStandaloneEnabled()) {
+          elements.standaloneCustomInput.value = '';
+        }
+      }
+    }
+  }
+
+  function updateStandaloneNamingVisibility() {
+    const standaloneEnabled = isStandaloneEnabled();
+    if (elements.standaloneNamingOptions) {
+      if (standaloneEnabled) {
+        elements.standaloneNamingOptions.removeAttribute('hidden');
+      } else {
+        elements.standaloneNamingOptions.setAttribute('hidden', 'hidden');
+      }
+    }
+    if (!standaloneEnabled && elements.standaloneCustomToggle) {
+      elements.standaloneCustomToggle.checked = false;
+    }
+    updateStandaloneCustomNameState();
+  }
+
+  function updateStandaloneState() {
+    const enabled = isStandaloneEnabled();
+
+    if (elements.movieNameInput) {
+      elements.movieNameInput.disabled = enabled;
+      elements.movieNameInput.required = !enabled;
+      if (enabled) {
+        elements.movieNameInput.value = '';
+        elements.movieNameInput.removeAttribute('required');
+      } else {
+        elements.movieNameInput.setAttribute('required', 'required');
+      }
+    }
+    if (elements.movieIdInput) {
+      elements.movieIdInput.value = '';
+    }
+    if (elements.titleInput && enabled) {
+      elements.titleInput.value = '';
+    }
+    if (elements.yearInput && enabled) {
+      elements.yearInput.value = '';
+    }
+    if (elements.tmdbInput && enabled) {
+      elements.tmdbInput.value = '';
+    }
+
+    if (elements.extraCheckbox) {
+      if (enabled && elements.extraCheckbox.checked) {
+        elements.extraCheckbox.checked = false;
+      }
+      elements.extraCheckbox.disabled = enabled;
+    }
+
+    updateExtraVisibility();
+    updateMovieNotFoundPrompt();
+    updateStandaloneNamingVisibility();
+
+    if (elements.movieFeedback) {
+      elements.movieFeedback.setAttribute('hidden', 'hidden');
     }
   }
 
@@ -1384,6 +1487,14 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.movieNameInput.addEventListener('change', handleMovieNameInput);
   }
 
+  if (elements.standaloneCheckbox) {
+    elements.standaloneCheckbox.addEventListener('change', updateStandaloneState);
+  }
+
+  if (elements.standaloneCustomToggle) {
+    elements.standaloneCustomToggle.addEventListener('change', updateStandaloneCustomNameState);
+  }
+
   initialiseMovieNotFoundPrompt();
   syncMovieSelection();
 
@@ -1530,6 +1641,16 @@ document.addEventListener('DOMContentLoaded', () => {
   elements.form.addEventListener('submit', async event => {
     event.preventDefault();
 
+    const standaloneEnabled = elements.standaloneCheckbox
+      ? elements.standaloneCheckbox.checked
+      : false;
+    const standaloneCustomEnabled = standaloneEnabled && elements.standaloneCustomToggle
+      ? elements.standaloneCustomToggle.checked
+      : false;
+    const standaloneCustomName = elements.standaloneCustomInput
+      ? elements.standaloneCustomInput.value.trim()
+      : '';
+
     const payload = {
       yturl: elements.ytInput ? elements.ytInput.value.trim() : '',
       movieName: elements.movieNameInput ? elements.movieNameInput.value.trim() : '',
@@ -1540,7 +1661,16 @@ document.addEventListener('DOMContentLoaded', () => {
       extra: elements.extraCheckbox ? elements.extraCheckbox.checked : false,
       extraType: elements.extraTypeSelect ? elements.extraTypeSelect.value : 'trailer',
       extra_name: elements.extraNameInput ? elements.extraNameInput.value.trim() : '',
-      playlist_mode: elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single'
+      playlist_mode: elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single',
+      standalone: standaloneEnabled,
+      standalone_name_mode: standaloneEnabled
+        ? standaloneCustomEnabled
+          ? 'custom'
+          : 'youtube'
+        : 'youtube',
+      standalone_custom_name: standaloneEnabled && standaloneCustomEnabled
+        ? standaloneCustomName
+        : ''
     };
 
     resetConsole('Submitting request...');
@@ -1554,11 +1684,20 @@ document.addEventListener('DOMContentLoaded', () => {
         errors.push('Please enter a valid YouTube URL.');
       }
     }
-    if (!payload.movieId) {
+    if (!payload.movieId && !payload.standalone) {
       errors.push('Please select a valid movie from the list.');
     }
     if (payload.extra && !payload.extra_name) {
       errors.push('Please provide an extra name.');
+    }
+
+    if (payload.standalone) {
+      payload.extra = false;
+      payload.extra_name = '';
+      payload.extraType = 'other';
+      if (payload.standalone_name_mode === 'custom' && !payload.standalone_custom_name) {
+        errors.push('Please provide a custom name for the standalone download.');
+      }
     }
 
     if (errors.length) {
@@ -1608,7 +1747,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   setConsoleVisibility(initialConsoleVisible, { skipStorage: true });
   setDebugMode(initialDebugMode);
-  updateExtraVisibility();
+  updateStandaloneState();
   renderDownloads();
   loadInitialJobs();
 });

@@ -94,6 +94,33 @@
           </div>
 
           <div class="form-check">
+            <input type="checkbox" id="standalone" name="standalone" />
+            <label for="standalone">Download without Radarr (create standalone folder)</label>
+          </div>
+          <p class="help-text" id="standaloneHelp">
+            By default, we'll create a folder using the YouTube title inside your first
+            configured library path.
+          </p>
+          <div class="standalone-options" id="standaloneNamingOptions" hidden>
+            <div class="form-check">
+              <input type="checkbox" id="standaloneCustomNameToggle" name="standaloneCustomNameToggle" />
+              <label for="standaloneCustomNameToggle">Use a custom folder and filename</label>
+            </div>
+            <div class="form-group" id="standaloneCustomNameGroup" hidden>
+              <label for="standaloneCustomName">Custom Name</label>
+              <input
+                type="text"
+                id="standaloneCustomName"
+                name="standaloneCustomName"
+                placeholder="Folder and video name"
+              />
+              <p class="help-text">
+                We'll create the folder and saved video file using this name.
+              </p>
+            </div>
+          </div>
+
+          <div class="form-check">
             <input type="checkbox" id="extra" name="extra" />
             <label for="extra">Store in subfolder (treat as extra)</label>
           </div>
