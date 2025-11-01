@@ -1534,133 +1534,8 @@ def process_download_job(
         default_label = "Playlist" if merge_playlist else "Video"
         if descriptive:
             log(f"Using custom descriptive name '{descriptive}'.")
-        elif merge_playlist:
-            try:
-                log("Querying yt-dlp for playlist title.")
-                yt_cmd = [
-                    "yt-dlp",
-                    "--skip-download",
-                    "--print",
-                    "%(playlist_title)s",
-                ]
-                if cookie_path:
-                    yt_cmd += ["--cookies", cookie_path]
-                yt_cmd.append(yt_url)
-                ensure_not_cancelled()
-                proc = subprocess.run(
-                    yt_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                titles = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-                playlist_title = titles[0] if titles else ""
-                descriptive = playlist_title or default_label
-                if playlist_title:
-                    log(f"Using playlist title '{playlist_title}'.")
-                else:
-                    warn(
-                        f"Playlist title was empty. Using fallback name '{default_label}'."
-                    )
-            except (
-                subprocess.CalledProcessError,
-                FileNotFoundError,
-                OSError,
-            ) as exc:  # pragma: no cover - command failure
-                descriptive = default_label
-                warn(
-                    "Failed to retrieve playlist title from yt-dlp "
-                    f"({exc}). Using fallback name '{default_label}'."
-                )
-        else:
-            try:
-                log("Querying yt-dlp for video title.")
-                yt_cmd = [
-                    "yt-dlp",
-                    "--get-title",
-                ]
-                if cookie_path:
-                    yt_cmd += ["--cookies", cookie_path]
-                yt_cmd.append(yt_url)
-                ensure_not_cancelled()
-                proc = subprocess.run(
-                    yt_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                descriptive = proc.stdout.strip() or default_label
-                log(f"Using YouTube title '{descriptive}'.")
-            except (
-                subprocess.CalledProcessError,
-                FileNotFoundError,
-                OSError,
-            ) as exc:  # pragma: no cover - command failure
-                descriptive = default_label
-                warn(
-                    "Failed to retrieve title from yt-dlp "
-                    f"({exc}). Using fallback name '{default_label}'."
-                )
 
-        descriptive = sanitize_filename(descriptive) or default_label
-
-        if extra:
-            extra_suffix = sanitize_filename(extra_name) or extra_type
-            if extra_suffix:
-                filename_base = f"{descriptive}-{extra_suffix}"
-            else:
-                filename_base = descriptive
-        else:
-            filename_base = descriptive
-
-        filename_base = filename_base or "Video"
-
-        if standalone:
-            folder_name = filename_base
-            if standalone_base_path is None:
-                fail("Standalone downloads require a configured library path.")
-                return
-            target_dir = os.path.join(standalone_base_path, folder_name)
-            created_new = not os.path.isdir(target_dir)
-            try:
-                os.makedirs(target_dir, exist_ok=True)
-            except OSError as exc:
-                fail(f"Failed to create standalone folder '{target_dir}': {exc}")
-                return
-            if created_new:
-                log(f"Created standalone folder at '{target_dir}'.")
-            else:
-                log(f"Standalone folder resolved to '{target_dir}'.")
-            canonical_stem = folder_name
-
-        pattern = os.path.join(target_dir, f"{filename_base}.*")
-        if any(os.path.exists(path) for path in glob_paths(pattern)):
-            log(f"File stem '{filename_base}' already exists. Searching for a free filename.")
-            suffix_index = 1
-            while True:
-                candidate_base = f"{filename_base} ({suffix_index})"
-                candidate_pattern = os.path.join(target_dir, f"{candidate_base}.*")
-                if not any(os.path.exists(path) for path in glob_paths(candidate_pattern)):
-                    filename_base = candidate_base
-                    log(f"Selected new filename stem '{filename_base}'.")
-                    break
-                suffix_index += 1
-
-        template_base = filename_base.replace("%", "%%")
-        if merge_playlist:
-            playlist_temp_dir = os.path.join(target_dir, f".yt2radarr_playlist_{job_id}")
-            os.makedirs(playlist_temp_dir, exist_ok=True)
-            log(
-                "Playlist merge enabled. Downloads will be staged in "
-                f"'{os.path.basename(playlist_temp_dir)}'."
-            )
-            target_template = os.path.join(
-                playlist_temp_dir, "%(playlist_index)05d - %(title)s.%(ext)s"
-            )
-            expected_pattern = os.path.join(playlist_temp_dir, "*.*")
-        else:
-            target_template = os.path.join(target_dir, f"{template_base}.%(ext)s")
-            expected_pattern = os.path.join(target_dir, f"{filename_base}.*")
+        info_payload: Optional[Dict] = None
 
         if shutil.which("ffmpeg") is None:
             warn(
@@ -1703,7 +1578,7 @@ def process_download_job(
         ) as exc:  # pragma: no cover - command failure
             warn(f"Failed to query format details via yt-dlp: {exc}")
         else:
-            info_payload: Optional[Dict] = None
+            info_payload = None
             for raw_line in info_result.stdout.splitlines():
                 stripped = raw_line.strip()
                 if not stripped:
@@ -1787,17 +1662,101 @@ def process_download_job(
                         ),
                     }
 
-            if resolved_format:
-                log(
-                    "Resolved YouTube format: "
-                    f"id={resolved_format['format_id']}, "
-                    f"resolution={resolved_format['resolution']}, "
-                    f"video_codec={resolved_format['video_codec']}, "
-                    f"audio_codec={resolved_format['audio_codec']}, "
-                    f"filesize={resolved_format['filesize']}"
-                )
+        if resolved_format:
+            log(
+                "Resolved YouTube format: "
+                f"id={resolved_format['format_id']}, "
+                f"resolution={resolved_format['resolution']}, "
+                f"video_codec={resolved_format['video_codec']}, "
+                f"audio_codec={resolved_format['audio_codec']}, "
+                f"filesize={resolved_format['filesize']}"
+            )
+        else:
+            log("yt-dlp did not report a resolved format; proceeding with download.")
+
+        if not descriptive:
+            candidate_title = ""
+            if info_payload:
+                if merge_playlist:
+                    candidate_title = (
+                        info_payload.get("playlist_title")
+                        or info_payload.get("playlist")
+                        or info_payload.get("title")
+                        or ""
+                    )
+                else:
+                    candidate_title = info_payload.get("title") or ""
+            candidate_title = candidate_title.strip()
+            if candidate_title:
+                descriptive = candidate_title
+                log(f"Using YouTube title '{descriptive}'.")
             else:
-                log("yt-dlp did not report a resolved format; proceeding with download.")
+                descriptive = default_label
+                subject = "playlist" if merge_playlist else "video"
+                warn(
+                    "yt-dlp did not provide a %s title. Using fallback name '%s'."
+                    % (subject, default_label)
+                )
+
+        descriptive = sanitize_filename(descriptive) or default_label
+
+        if extra:
+            extra_suffix = sanitize_filename(extra_name) or extra_type
+            if extra_suffix:
+                filename_base = f"{descriptive}-{extra_suffix}"
+            else:
+                filename_base = descriptive
+        else:
+            filename_base = descriptive
+
+        filename_base = filename_base or "Video"
+
+        if standalone:
+            folder_name = filename_base
+            if standalone_base_path is None:
+                fail("Standalone downloads require a configured library path.")
+                return
+            target_dir = os.path.join(standalone_base_path, folder_name)
+            created_new = not os.path.isdir(target_dir)
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except OSError as exc:
+                fail(f"Failed to create standalone folder '{target_dir}': {exc}")
+                return
+            if created_new:
+                log(f"Created standalone folder at '{target_dir}'.")
+            else:
+                log(f"Standalone folder resolved to '{target_dir}'.")
+            canonical_stem = folder_name
+
+        pattern = os.path.join(target_dir, f"{filename_base}.*")
+        if any(os.path.exists(path) for path in glob_paths(pattern)):
+            log(f"File stem '{filename_base}' already exists. Searching for a free filename.")
+            suffix_index = 1
+            while True:
+                candidate_base = f"{filename_base} ({suffix_index})"
+                candidate_pattern = os.path.join(target_dir, f"{candidate_base}.*")
+                if not any(os.path.exists(path) for path in glob_paths(candidate_pattern)):
+                    filename_base = candidate_base
+                    log(f"Selected new filename stem '{filename_base}'.")
+                    break
+                suffix_index += 1
+
+        template_base = filename_base.replace("%", "%%")
+        if merge_playlist:
+            playlist_temp_dir = os.path.join(target_dir, f".yt2radarr_playlist_{job_id}")
+            os.makedirs(playlist_temp_dir, exist_ok=True)
+            log(
+                "Playlist merge enabled. Downloads will be staged in "
+                f"'{os.path.basename(playlist_temp_dir)}'."
+            )
+            target_template = os.path.join(
+                playlist_temp_dir, "%(playlist_index)05d - %(title)s.%(ext)s"
+            )
+            expected_pattern = os.path.join(playlist_temp_dir, "*.*")
+        else:
+            target_template = os.path.join(target_dir, f"{template_base}.%(ext)s")
+            expected_pattern = os.path.join(target_dir, f"{filename_base}.*")
 
         command = ["yt-dlp"]
         if cookie_path:
