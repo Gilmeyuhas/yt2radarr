@@ -24,6 +24,15 @@
         <h1>YT2Radarr - Radarr YouTube Video Importer</h1>
       </div>
       <div class="header-actions">
+        <button
+          type="button"
+          id="themeToggleButton"
+          class="button-secondary theme-toggle-button"
+          aria-pressed="false"
+          title="Switch to light mode"
+        >
+          🌞 Light Mode
+        </button>
         {% if configured %}
           <a class="link-button" href="{{ url_for('index') }}">Back to App</a>
         {% endif %}
@@ -192,5 +201,6 @@
       </aside>
     </div>
   </div>
+  <script src="{{ url_for('static', filename='script.js') }}" defer></script>
 </body>
 </html>
