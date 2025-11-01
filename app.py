@@ -1773,32 +1773,32 @@ def process_download_job(
             acknowledge_cancellation()
             raise JobCancelled()
 
-            if info_returncode not in (0, None) and not metadata_timed_out:
-                warn(
-                    "yt-dlp metadata query exited with status "
-                    f"{info_returncode}; continuing without metadata."
-                )
-            else:
-                for raw_line in info_stdout.splitlines():
-                    stripped = raw_line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        info_payload = json.loads(stripped)
-                    except json.JSONDecodeError:
-                        continue
-                    else:
-                        break
+        if info_returncode not in (0, None) and not metadata_timed_out:
+            warn(
+                "yt-dlp metadata query exited with status "
+                f"{info_returncode}; continuing without metadata."
+            )
+        else:
+            for raw_line in info_stdout.splitlines():
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                try:
+                    info_payload = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                else:
+                    break
 
-                if info_stderr:
-                    for line in info_stderr.strip().splitlines():
-                        debug(f"yt-dlp metadata: {line}")
+            if info_stderr:
+                for line in info_stderr.strip().splitlines():
+                    debug(f"yt-dlp metadata: {line}")
 
-                if info_payload:
-                    log("YouTube metadata retrieved successfully.")
+            if info_payload:
+                log("YouTube metadata retrieved successfully.")
 
-                if info_payload:
-                    resolved_format = _resolve_requested_format(info_payload)
+            if info_payload:
+                resolved_format = _resolve_requested_format(info_payload)
 
         if resolved_format:
             log(
