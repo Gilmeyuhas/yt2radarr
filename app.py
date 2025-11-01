@@ -1586,8 +1586,36 @@ def process_download_job(
             ) as info_process:
                 _set_job_process(job_id, info_process)
                 start_time = time.monotonic()
-                while True:
-                    ensure_not_cancelled()
+
+                communication_complete = threading.Event()
+                stdout_holder = {"value": ""}
+                stderr_holder = {"value": ""}
+                communication_error: List[BaseException] = []
+
+                def _drain_metadata_process() -> None:
+                    try:
+                        stdout_data, stderr_data = info_process.communicate()
+                        stdout_holder["value"] = stdout_data or ""
+                        stderr_holder["value"] = stderr_data or ""
+                    except BaseException as exc:  # pragma: no cover - defensive
+                        communication_error.append(exc)
+                    finally:
+                        communication_complete.set()
+
+                reader_thread = threading.Thread(
+                    target=_drain_metadata_process,
+                    name=f"yt2radarr-metadata-{job_id}",
+                    daemon=True,
+                )
+                reader_thread.start()
+
+                while not communication_complete.wait(timeout=0.2):
+                    if cancel_event.is_set():
+                        acknowledge_cancellation()
+                        _terminate_process(info_process)
+                        communication_complete.wait(timeout=5)
+                        reader_thread.join(timeout=5)
+                        raise JobCancelled()
                     if METADATA_FETCH_TIMEOUT_SECONDS:
                         elapsed = time.monotonic() - start_time
                         if elapsed >= METADATA_FETCH_TIMEOUT_SECONDS:
@@ -1597,26 +1625,17 @@ def process_download_job(
                                 f"{METADATA_FETCH_TIMEOUT_SECONDS} seconds; "
                                 "continuing without metadata."
                             )
-                            try:
-                                info_process.terminate()
-                            except OSError:
-                                pass
+                            _terminate_process(info_process)
                             break
-                    try:
-                        info_process.wait(timeout=0.5)
-                    except subprocess.TimeoutExpired:
-                        continue
-                    else:
-                        break
 
-                try:
-                    info_stdout, info_stderr = info_process.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        info_process.kill()
-                    except OSError:
-                        pass
-                    info_stdout, info_stderr = info_process.communicate()
+                communication_complete.wait(timeout=5)
+                reader_thread.join(timeout=5)
+
+                if communication_error:
+                    raise communication_error[0]
+
+                info_stdout = stdout_holder["value"]
+                info_stderr = stderr_holder["value"]
                 info_returncode = info_process.returncode
         except (
             FileNotFoundError,
