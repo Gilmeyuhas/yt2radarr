@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 import uuid
+import selectors
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -1581,62 +1582,105 @@ def process_download_job(
                 info_command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
                 stdin=subprocess.DEVNULL,
+                text=False,
             ) as info_process:
                 _set_job_process(job_id, info_process)
                 start_time = time.monotonic()
 
-                communication_complete = threading.Event()
-                stdout_holder = {"value": ""}
-                stderr_holder = {"value": ""}
-                communication_error: List[BaseException] = []
+                selector = selectors.DefaultSelector()
+                stdout_chunks: List[bytes] = []
+                stderr_chunks: List[bytes] = []
 
-                def _drain_metadata_process() -> None:
+                if info_process.stdout is not None:
+                    selector.register(info_process.stdout, selectors.EVENT_READ, "stdout")
+                if info_process.stderr is not None:
+                    selector.register(info_process.stderr, selectors.EVENT_READ, "stderr")
+
+                def _drain_events(timeout: float) -> None:
                     try:
-                        stdout_data, stderr_data = info_process.communicate()
-                        stdout_holder["value"] = stdout_data or ""
-                        stderr_holder["value"] = stderr_data or ""
-                    except BaseException as exc:  # pragma: no cover - defensive
-                        communication_error.append(exc)
-                    finally:
-                        communication_complete.set()
+                        events = selector.select(timeout=timeout)
+                    except OSError:
+                        events = []
+                    for key, _ in events:
+                        stream = key.fileobj
+                        label = key.data
+                        try:
+                            chunk = stream.read1(4096)
+                        except (ValueError, OSError):
+                            chunk = b""
+                        if not chunk:
+                            try:
+                                selector.unregister(stream)
+                            except (KeyError, ValueError):
+                                pass
+                            try:
+                                stream.close()
+                            except OSError:
+                                pass
+                            continue
+                        if label == "stdout":
+                            stdout_chunks.append(chunk)
+                        else:
+                            stderr_chunks.append(chunk)
 
-                reader_thread = threading.Thread(
-                    target=_drain_metadata_process,
-                    name=f"yt2radarr-metadata-{job_id}",
-                    daemon=True,
-                )
-                reader_thread.start()
-
-                while not communication_complete.wait(timeout=0.2):
-                    if cancel_event.is_set():
-                        acknowledge_cancellation()
-                        _terminate_process(info_process)
-                        communication_complete.wait(timeout=5)
-                        reader_thread.join(timeout=5)
-                        raise JobCancelled()
-                    if METADATA_FETCH_TIMEOUT_SECONDS:
-                        elapsed = time.monotonic() - start_time
-                        if elapsed >= METADATA_FETCH_TIMEOUT_SECONDS:
-                            metadata_timed_out = True
-                            warn(
-                                "yt-dlp metadata query exceeded "
-                                f"{METADATA_FETCH_TIMEOUT_SECONDS} seconds; "
-                                "continuing without metadata."
-                            )
+                try:
+                    while True:
+                        if cancel_event.is_set():
+                            acknowledge_cancellation()
                             _terminate_process(info_process)
-                            break
+                            raise JobCancelled()
 
-                communication_complete.wait(timeout=5)
-                reader_thread.join(timeout=5)
+                        if METADATA_FETCH_TIMEOUT_SECONDS:
+                            elapsed = time.monotonic() - start_time
+                            if elapsed >= METADATA_FETCH_TIMEOUT_SECONDS:
+                                metadata_timed_out = True
+                                warn(
+                                    "yt-dlp metadata query exceeded "
+                                    f"{METADATA_FETCH_TIMEOUT_SECONDS} seconds; "
+                                    "continuing without metadata."
+                                )
+                                _terminate_process(info_process)
+                                break
 
-                if communication_error:
-                    raise communication_error[0]
+                        _drain_events(timeout=0.2)
 
-                info_stdout = stdout_holder["value"]
-                info_stderr = stderr_holder["value"]
-                info_returncode = info_process.returncode
+                        if not selector.get_map():
+                            if info_process.poll() is not None:
+                                break
+                            try:
+                                info_process.wait(timeout=0.2)
+                            except subprocess.TimeoutExpired:
+                                continue
+                            else:
+                                break
+
+                        if info_process.poll() is not None:
+                            # Process has exited but there may still be buffered data.
+                            _drain_events(timeout=0)
+                            if not selector.get_map():
+                                break
+                finally:
+                    # Drain any remaining buffered data without blocking.
+                    try:
+                        _drain_events(timeout=0)
+                    except Exception:  # pragma: no cover - defensive cleanup
+                        pass
+                    selector.close()
+
+                try:
+                    info_returncode = info_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    _terminate_process(info_process)
+                    try:
+                        info_returncode = info_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        info_returncode = info_process.returncode
+                except OSError:
+                    info_returncode = info_process.returncode
+
+                info_stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace")
+                info_stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace")
         except (
             FileNotFoundError,
             OSError,
