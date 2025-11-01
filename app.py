@@ -1564,11 +1564,14 @@ def process_download_job(
         resolved_format: Dict[str, str] = {}
         ensure_not_cancelled()
 
+        log("Fetching YouTube metadata to determine output naming and formats.")
+
         try:
             info_result = subprocess.run(
                 info_command,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
                 check=True,
             )
         except (
@@ -1833,6 +1836,7 @@ def process_download_job(
                 text=True,
                 bufsize=1,
                 cwd=target_dir,
+                stdin=subprocess.DEVNULL,
             ) as process:
                 _set_job_process(job_id, process)
                 assert process.stdout is not None
@@ -1955,6 +1959,7 @@ def process_download_job(
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    stdin=subprocess.DEVNULL,
                 ) as merge_process:
                     _set_job_process(job_id, merge_process)
                     try:
