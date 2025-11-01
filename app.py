@@ -1601,21 +1601,22 @@ def process_download_job(
                                 info_process.terminate()
                             except OSError:
                                 pass
-                            try:
-                                info_stdout, info_stderr = info_process.communicate(timeout=5)
-                            except subprocess.TimeoutExpired:
-                                try:
-                                    info_process.kill()
-                                except OSError:
-                                    pass
-                                info_stdout, info_stderr = info_process.communicate()
                             break
                     try:
-                        info_stdout, info_stderr = info_process.communicate(timeout=0.5)
+                        info_process.wait(timeout=0.5)
                     except subprocess.TimeoutExpired:
                         continue
                     else:
                         break
+
+                try:
+                    info_stdout, info_stderr = info_process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        info_process.kill()
+                    except OSError:
+                        pass
+                    info_stdout, info_stderr = info_process.communicate()
                 info_returncode = info_process.returncode
         except (
             FileNotFoundError,
