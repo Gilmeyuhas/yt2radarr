@@ -9,6 +9,7 @@ document.addEventListener('DOMContentLoaded', () => {
     yearInput: document.getElementById('year'),
     tmdbInput: document.getElementById('tmdb'),
     extraCheckbox: document.getElementById('extra'),
+    standaloneCheckbox: document.getElementById('standalone'),
     playlistModeSelect: document.getElementById('playlistMode'),
     extraTypeSelect: document.getElementById('extraType'),
     extraFields: document.getElementById('extraFields'),
@@ -126,6 +127,8 @@ document.addEventListener('DOMContentLoaded', () => {
     'treating video as main video file',
     'storing video in subfolder',
     'created movie folder',
+    'created standalone folder',
+    'standalone folder resolved',
     'fetching radarr details',
     'resolved youtube format'
   ];
@@ -310,6 +313,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!elements.movieNotFoundPrompt || !elements.movieNameInput) {
       return;
     }
+    if (isStandaloneEnabled()) {
+      elements.movieNotFoundPrompt.setAttribute('hidden', 'hidden');
+      return;
+    }
     const value = elements.movieNameInput.value ? elements.movieNameInput.value.trim() : '';
     const hasValue = Boolean(value);
     const option = hasValue ? findMatchingMovieOption(value) : null;
@@ -317,6 +324,51 @@ document.addEventListener('DOMContentLoaded', () => {
       elements.movieNotFoundPrompt.setAttribute('hidden', 'hidden');
     } else {
       elements.movieNotFoundPrompt.removeAttribute('hidden');
+    }
+  }
+
+  function isStandaloneEnabled() {
+    return elements.standaloneCheckbox ? elements.standaloneCheckbox.checked : false;
+  }
+
+  function updateStandaloneState() {
+    const enabled = isStandaloneEnabled();
+
+    if (elements.movieNameInput) {
+      elements.movieNameInput.disabled = enabled;
+      elements.movieNameInput.required = !enabled;
+      if (enabled) {
+        elements.movieNameInput.value = '';
+        elements.movieNameInput.removeAttribute('required');
+      } else {
+        elements.movieNameInput.setAttribute('required', 'required');
+      }
+    }
+    if (elements.movieIdInput) {
+      elements.movieIdInput.value = '';
+    }
+    if (elements.titleInput && enabled) {
+      elements.titleInput.value = '';
+    }
+    if (elements.yearInput && enabled) {
+      elements.yearInput.value = '';
+    }
+    if (elements.tmdbInput && enabled) {
+      elements.tmdbInput.value = '';
+    }
+
+    if (elements.extraCheckbox) {
+      if (enabled && elements.extraCheckbox.checked) {
+        elements.extraCheckbox.checked = false;
+      }
+      elements.extraCheckbox.disabled = enabled;
+    }
+
+    updateExtraVisibility();
+    updateMovieNotFoundPrompt();
+
+    if (elements.movieFeedback) {
+      elements.movieFeedback.setAttribute('hidden', 'hidden');
     }
   }
 
@@ -1384,6 +1436,10 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.movieNameInput.addEventListener('change', handleMovieNameInput);
   }
 
+  if (elements.standaloneCheckbox) {
+    elements.standaloneCheckbox.addEventListener('change', updateStandaloneState);
+  }
+
   initialiseMovieNotFoundPrompt();
   syncMovieSelection();
 
@@ -1540,7 +1596,8 @@ document.addEventListener('DOMContentLoaded', () => {
       extra: elements.extraCheckbox ? elements.extraCheckbox.checked : false,
       extraType: elements.extraTypeSelect ? elements.extraTypeSelect.value : 'trailer',
       extra_name: elements.extraNameInput ? elements.extraNameInput.value.trim() : '',
-      playlist_mode: elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single'
+      playlist_mode: elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single',
+      standalone: elements.standaloneCheckbox ? elements.standaloneCheckbox.checked : false
     };
 
     resetConsole('Submitting request...');
@@ -1554,11 +1611,17 @@ document.addEventListener('DOMContentLoaded', () => {
         errors.push('Please enter a valid YouTube URL.');
       }
     }
-    if (!payload.movieId) {
+    if (!payload.movieId && !payload.standalone) {
       errors.push('Please select a valid movie from the list.');
     }
     if (payload.extra && !payload.extra_name) {
       errors.push('Please provide an extra name.');
+    }
+
+    if (payload.standalone) {
+      payload.extra = false;
+      payload.extra_name = '';
+      payload.extraType = 'other';
     }
 
     if (errors.length) {
@@ -1608,7 +1671,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   setConsoleVisibility(initialConsoleVisible, { skipStorage: true });
   setDebugMode(initialDebugMode);
-  updateExtraVisibility();
+  updateStandaloneState();
   renderDownloads();
   loadInitialJobs();
 });
