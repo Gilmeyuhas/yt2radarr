@@ -2,6 +2,7 @@
 
 # pylint: disable=too-many-lines
 
+import itertools
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -26,6 +28,7 @@ from flask import (  # pylint: disable=import-error
     url_for,
 )
 from yt_dlp import YoutubeDL  # pylint: disable=import-error
+from yt_dlp.extractor.youtube import YoutubeSearchIE  # pylint: disable=import-error
 from yt_dlp.utils import DownloadError, ExtractorError  # pylint: disable=import-error
 
 from jobs import JobRepository
@@ -72,6 +75,10 @@ YTDLP_FORMAT_SELECTOR = (
 )
 
 YOUTUBE_SEARCH_MAX_RESULTS = 20
+YOUTUBE_SEARCH_CACHE_TTL = 90.0
+
+_YOUTUBE_SEARCH_CACHE: Dict[Tuple[str, int], Tuple[float, List[Dict[str, Any]]]] = {}
+_YOUTUBE_SEARCH_LOCK = threading.Lock()
 def _format_filesize(value: Optional[float]) -> str:
     """Return a human-readable string for a byte size."""
 
@@ -213,51 +220,71 @@ def _search_youtube(query: str, limit: int = 10) -> List[Dict[str, Any]]:
     except (TypeError, ValueError):
         max_results = 1
     max_results = max(1, min(max_results, YOUTUBE_SEARCH_MAX_RESULTS))
-    search_expression = f"ytsearch{max_results}:{search_terms}"
+    cache_key = (search_terms.lower(), max_results)
+    now = time.monotonic()
+    with _YOUTUBE_SEARCH_LOCK:
+        cached = _YOUTUBE_SEARCH_CACHE.get(cache_key)
+    if cached and now - cached[0] < YOUTUBE_SEARCH_CACHE_TTL:
+        return [dict(item) for item in cached[1]]
+
     options = {
         "quiet": True,
         "skip_download": True,
-        "extract_flat": False,
+        "extract_flat": True,
         "noplaylist": True,
         "cachedir": False,
+        "socket_timeout": 10,
+        "retries": 1,
+        "extractor_retries": 0,
+        "nocheckcertificate": True,
     }
+
     try:
-        with YoutubeDL(options) as ydl:
-            info = ydl.extract_info(search_expression, download=False)
+        searcher = YoutubeSearchIE(YoutubeDL(options))
+    except Exception as exc:  # pragma: no cover - defensive, constructor shouldn't fail
+        raise RuntimeError(f"Failed to initialise YouTube search: {exc}") from exc
+
+    results: List[Dict[str, Any]] = []
+    try:
+        iterator = searcher._search_results(search_terms)
+        for entry in itertools.islice(iterator, max_results):
+            if not isinstance(entry, dict):
+                continue
+            entry = searcher._downloader.sanitize_info(entry)
+            url = entry.get("url")
+            if not url:
+                video_id = entry.get("id")
+                if isinstance(video_id, str):
+                    url = f"https://www.youtube.com/watch?v={video_id}"
+            if not url:
+                continue
+
+            view_count = entry.get("view_count")
+            if view_count is None:
+                view_count = entry.get("concurrent_view_count")
+
+            results.append(
+                {
+                    "id": entry.get("id"),
+                    "title": entry.get("title"),
+                    "url": url,
+                    "uploader": entry.get("uploader") or entry.get("channel"),
+                    "viewCount": view_count,
+                    "duration": entry.get("duration"),
+                }
+            )
     except (DownloadError, ExtractorError) as exc:
         raise RuntimeError(f"YouTube search failed: {exc}") from exc
 
-    entries: List[Dict[str, Any]] = []
-    if isinstance(info, dict):
-        raw_entries = info.get("entries")
-        if isinstance(raw_entries, list) and raw_entries:
-            entries = [entry for entry in raw_entries if isinstance(entry, dict)]
-        elif info.get("_type") == "video":
-            entries = [info]
-    elif isinstance(info, list):
-        entries = [entry for entry in info if isinstance(entry, dict)]
+    with _YOUTUBE_SEARCH_LOCK:
+        _YOUTUBE_SEARCH_CACHE[cache_key] = (now, [dict(item) for item in results])
+        expired_keys = [
+            key for key, (timestamp, _) in _YOUTUBE_SEARCH_CACHE.items()
+            if now - timestamp >= YOUTUBE_SEARCH_CACHE_TTL
+        ]
+        for key in expired_keys:
+            _YOUTUBE_SEARCH_CACHE.pop(key, None)
 
-    results: List[Dict[str, Any]] = []
-    for entry in entries:
-        video_id = entry.get("id") or entry.get("url")
-        url = entry.get("webpage_url")
-        if not url and isinstance(video_id, str):
-            if video_id.startswith("http://") or video_id.startswith("https://"):
-                url = video_id
-            else:
-                url = f"https://www.youtube.com/watch?v={video_id}"
-        if not url:
-            continue
-        results.append(
-            {
-                "id": video_id,
-                "title": entry.get("title"),
-                "url": url,
-                "uploader": entry.get("uploader") or entry.get("channel"),
-                "viewCount": entry.get("view_count"),
-                "duration": entry.get("duration"),
-            }
-        )
     return results
 
 
