@@ -35,8 +35,7 @@ document.addEventListener('DOMContentLoaded', () => {
     toggleConsoleButton: document.getElementById('toggleConsoleButton'),
     sideColumn: document.getElementById('debugConsoleRegion'),
     refreshLibraryButton: document.getElementById('refreshLibraryButton'),
-    themeToggleButton: document.getElementById('themeToggleButton'),
-    themePreviewCards: Array.from(document.querySelectorAll('[data-theme-preview]'))
+    themeToggleButton: document.getElementById('themeToggleButton')
   };
 
   const THEME_STORAGE_KEY = 'yt2radarr.theme';
@@ -102,16 +101,6 @@ document.addEventListener('DOMContentLoaded', () => {
     );
   }
 
-  function updateThemePreviewState(theme) {
-    if (!elements.themePreviewCards || !elements.themePreviewCards.length) {
-      return;
-    }
-    elements.themePreviewCards.forEach((card) => {
-      const isActive = card.dataset.themePreview === theme;
-      card.classList.toggle('is-active', isActive);
-    });
-  }
-
   function applyTheme(theme, options = {}) {
     const { persist = true } = options || {};
     const normalized = theme === 'light' ? 'light' : 'dark';
@@ -120,7 +109,6 @@ document.addEventListener('DOMContentLoaded', () => {
       document.body.dataset.theme = normalized;
     }
     updateThemeToggleButton(normalized);
-    updateThemePreviewState(normalized);
     if (persist) {
       userSelectedTheme = normalized;
       persistThemePreference(normalized);
