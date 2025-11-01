@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -68,6 +69,9 @@ YTDLP_FORMAT_SELECTOR = (
     "95/"
     "best"
 )
+METADATA_FETCH_TIMEOUT_SECONDS = 120
+
+
 def _format_filesize(value: Optional[float]) -> str:
     """Return a human-readable string for a byte size."""
 
@@ -1566,23 +1570,73 @@ def process_download_job(
 
         log("Fetching YouTube metadata to determine output naming and formats.")
 
+        info_payload = None
+        info_stdout = ""
+        info_stderr = ""
+        info_returncode: Optional[int] = None
+        metadata_timed_out = False
+
         try:
-            info_result = subprocess.run(
+            with subprocess.Popen(
                 info_command,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 stdin=subprocess.DEVNULL,
-                check=True,
-            )
+            ) as info_process:
+                _set_job_process(job_id, info_process)
+                start_time = time.monotonic()
+                while True:
+                    ensure_not_cancelled()
+                    if METADATA_FETCH_TIMEOUT_SECONDS:
+                        elapsed = time.monotonic() - start_time
+                        if elapsed >= METADATA_FETCH_TIMEOUT_SECONDS:
+                            metadata_timed_out = True
+                            warn(
+                                "yt-dlp metadata query exceeded "
+                                f"{METADATA_FETCH_TIMEOUT_SECONDS} seconds; "
+                                "continuing without metadata."
+                            )
+                            try:
+                                info_process.terminate()
+                            except OSError:
+                                pass
+                            try:
+                                info_stdout, info_stderr = info_process.communicate(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                try:
+                                    info_process.kill()
+                                except OSError:
+                                    pass
+                                info_stdout, info_stderr = info_process.communicate()
+                            break
+                    try:
+                        info_stdout, info_stderr = info_process.communicate(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        continue
+                    else:
+                        break
+                info_returncode = info_process.returncode
         except (
-            subprocess.CalledProcessError,
             FileNotFoundError,
             OSError,
+            ValueError,
         ) as exc:  # pragma: no cover - command failure
             warn(f"Failed to query format details via yt-dlp: {exc}")
+        finally:
+            _clear_job_process(job_id)
+
+        if cancel_event.is_set():
+            acknowledge_cancellation()
+            raise JobCancelled()
+
+        if info_returncode not in (0, None) and not metadata_timed_out:
+            warn(
+                "yt-dlp metadata query exited with status "
+                f"{info_returncode}; continuing without metadata."
+            )
         else:
-            info_payload = None
-            for raw_line in info_result.stdout.splitlines():
+            for raw_line in info_stdout.splitlines():
                 stripped = raw_line.strip()
                 if not stripped:
                     continue
@@ -1592,6 +1646,13 @@ def process_download_job(
                     continue
                 else:
                     break
+
+            if info_stderr:
+                for line in info_stderr.strip().splitlines():
+                    debug(f"yt-dlp metadata: {line}")
+
+            if info_payload:
+                log("YouTube metadata retrieved successfully.")
 
             if info_payload:
                 requested_formats = info_payload.get("requested_formats") or []
