@@ -29,6 +29,15 @@
       <div class="header-actions">
         <button
           type="button"
+          id="themeToggleButton"
+          class="button-secondary theme-toggle-button"
+          aria-pressed="false"
+          title="Switch to light mode"
+        >
+          🌞 Light Mode
+        </button>
+        <button
+          type="button"
           id="toggleConsoleButton"
           class="button-secondary toggle-console-button"
           aria-controls="debugConsoleRegion"
@@ -80,25 +89,30 @@
 
           <div class="form-group">
             <label for="movieName">Movie</label>
-            <input
-              list="movieOptions"
-              id="movieName"
-              name="movieName"
-              placeholder="Start typing movie title..."
-              autocomplete="off"
-              required
-            />
-            <datalist id="movieOptions">
-              {% for movie in movies %}
-                <option
-                  data-id="{{ movie['id'] }}"
-                  data-title="{{ movie['title'] }}"
-                  data-year="{{ movie.get('year', '') }}"
-                  data-tmdb="{{ movie.get('tmdbId', '') }}"
-                  value="{{ movie['title'] }}{% if movie.get('year') %} ({{ movie['year'] }}){% endif %}"
-                ></option>
-              {% endfor %}
-            </datalist>
+            <div class="movie-input-wrapper">
+              <input
+                list="movieOptions"
+                id="movieName"
+                name="movieName"
+                placeholder="Start typing movie title..."
+                autocomplete="off"
+                required
+              />
+              <button type="button" class="button-secondary" id="refreshLibraryButton">
+                Refresh Library
+              </button>
+              <datalist id="movieOptions">
+                {% for movie in movies %}
+                  <option
+                    data-id="{{ movie['id'] }}"
+                    data-title="{{ movie['title'] }}"
+                    data-year="{{ movie.get('year', '') }}"
+                    data-tmdb="{{ movie.get('tmdbId', '') }}"
+                    value="{{ movie['title'] }}{% if movie.get('year') %} ({{ movie['year'] }}){% endif %}"
+                  ></option>
+                {% endfor %}
+              </datalist>
+            </div>
           </div>
           <input type="hidden" id="movieId" name="movieId" />
 
