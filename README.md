@@ -9,6 +9,7 @@ A web UI that turns any publicly accessible video from YouTube, Vimeo, or Dailym
 ## ✨ What it does
 
 * Fetches your entire Radarr library so you can attach a download to the exact title (including extras such as trailers or behind-the-scenes clips).
+* Optionally connects to Sonarr so you can drop recaps or specials straight into a season or the series "Specials" folder.
 * Uses `yt-dlp` with a tuned format selector to prefer high bitrate HLS/H.264 sources before falling back to other codecs.
 * Renames downloads to Plex/Radarr naming conventions and resolves extras into sub-folders when requested.
 * Flexible playlist workflows: merge an entire playlist into a single movie file while preserving Radarr naming conventions.
@@ -85,6 +86,7 @@ Everything about the Compose file is customizable - swap ports, change mount poi
 | **Radarr URL** | Base URL of your Radarr instance (e.g. `http://<yourip>:7878`). |
 | **Radarr API Key** | Generate it under Radarr ➝ Settings ➝ General. |
 | **Movie Library Paths** | Absolute paths available to yt2radarr. Used to locate folders and avoid duplicates. |
+| **Series Library Paths (optional)** | Extra absolute paths to resolve Sonarr series folders. Falls back to movie paths when empty. |
 | **Path Overrides** | Map Radarr’s internal paths to the paths available on this host/container. Format: `remote => local`. |
 | **Debug Mode** | When enabled, shows the full log in the UI console. |
 | **YouTube Cookies (optional)** | Paste a Netscape-format cookies file to bypass any authentication problems. Saved as `cookies.txt` with owner-only permissions in your config directory. |

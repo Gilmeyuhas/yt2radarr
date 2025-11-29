@@ -2,9 +2,19 @@ document.addEventListener('DOMContentLoaded', () => {
   const elements = {
     form: document.getElementById('movieForm'),
     ytInput: document.getElementById('yturl'),
+    destinationInputs: document.querySelectorAll('input[name="destination"]'),
+    movieDestinationFields: document.getElementById('movieDestinationFields'),
+    seriesDestinationFields: document.getElementById('seriesDestinationFields'),
     movieNameInput: document.getElementById('movieName'),
     movieOptions: document.getElementById('movieOptions'),
     movieIdInput: document.getElementById('movieId'),
+    seriesNameInput: document.getElementById('seriesName'),
+    seriesOptions: document.getElementById('seriesOptions'),
+    seriesIdInput: document.getElementById('seriesId'),
+    seriesSeasonSelect: document.getElementById('seriesSeason'),
+    seriesVideoTypeSelect: document.getElementById('seriesVideoType'),
+    seriesVideoLabelInput: document.getElementById('seriesVideoLabel'),
+    refreshSeriesButton: document.getElementById('refreshSeriesButton'),
     titleInput: document.getElementById('title'),
     yearInput: document.getElementById('year'),
     tmdbInput: document.getElementById('tmdb'),
@@ -132,6 +142,33 @@ document.addEventListener('DOMContentLoaded', () => {
     return;
   }
 
+  function getDestinationMode() {
+    const inputs = elements.destinationInputs ? Array.from(elements.destinationInputs) : [];
+    for (const input of inputs) {
+      if (input instanceof HTMLInputElement && input.checked) {
+        return input.value === 'series' ? 'series' : 'movie';
+      }
+    }
+    return state.destination === 'series' ? 'series' : 'movie';
+  }
+
+  function isSeriesDestination() {
+    return getDestinationMode() === 'series';
+  }
+
+  function setDestinationMode(mode) {
+    const normalized = mode === 'series' ? 'series' : 'movie';
+    state.destination = normalized;
+    if (elements.destinationInputs) {
+      elements.destinationInputs.forEach(input => {
+        if (input instanceof HTMLInputElement) {
+          input.checked = input.value === normalized;
+        }
+      });
+    }
+    updateDestinationState();
+  }
+
   const STATUS_LABELS = {
     queued: 'Queued',
     processing: 'Processing',
@@ -198,6 +235,8 @@ document.addEventListener('DOMContentLoaded', () => {
     selectedJobId: null,
     activeConsoleJobId: null,
     pendingCancellations: new Set(),
+    destination: 'movie',
+    seriesOptions: [],
     addMovie: {
       modalOpen: false,
       searchTimeout: null,
@@ -337,6 +376,30 @@ document.addEventListener('DOMContentLoaded', () => {
     return year ? `${title} (${year})` : title;
   }
 
+  function getSeriesOptions() {
+    if (!elements.seriesOptions) {
+      return [];
+    }
+    return Array.from(elements.seriesOptions.querySelectorAll('option'));
+  }
+
+  function findMatchingSeriesOption(value) {
+    if (!value) {
+      return null;
+    }
+    const target = value.trim();
+    if (!target) {
+      return null;
+    }
+    return getSeriesOptions().find(option => (option.value || '').trim() === target) || null;
+  }
+
+  function buildSeriesOptionValue(show) {
+    const title = (show && show.title ? String(show.title) : '').trim() || 'Series';
+    const year = show && show.year ? String(show.year).trim() : '';
+    return year ? `${title} (${year})` : title;
+  }
+
   function upsertMovieOption(movie) {
     if (!elements.movieOptions || !movie || typeof movie !== 'object') {
       return null;
@@ -394,6 +457,38 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.movieOptions.appendChild(fragment);
   }
 
+  function replaceSeriesOptions(series) {
+    if (!elements.seriesOptions) {
+      return;
+    }
+    elements.seriesOptions.innerHTML = '';
+    if (!Array.isArray(series) || !series.length) {
+      populateSeasonOptions('');
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    series.forEach(show => {
+      if (!show || typeof show !== 'object') {
+        return;
+      }
+      const seriesId = show.id != null ? String(show.id) : '';
+      if (!seriesId) {
+        return;
+      }
+      const title = (show.title || '').trim();
+      const year = show.year != null ? String(show.year).trim() : '';
+      const seasons = Array.isArray(show.seasons) ? show.seasons.join(',') : '';
+      const option = document.createElement('option');
+      option.value = buildSeriesOptionValue({ title, year });
+      option.setAttribute('data-id', seriesId);
+      option.setAttribute('data-title', title);
+      option.setAttribute('data-year', year);
+      option.setAttribute('data-seasons', seasons);
+      fragment.appendChild(option);
+    });
+    elements.seriesOptions.appendChild(fragment);
+  }
+
   function setMovieFeedback(message, type = 'info') {
     if (!elements.movieFeedback) {
       return;
@@ -425,7 +520,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!elements.movieNotFoundPrompt || !elements.movieNameInput) {
       return;
     }
-    if (isStandaloneEnabled()) {
+    if (isStandaloneEnabled() || isSeriesDestination()) {
       elements.movieNotFoundPrompt.setAttribute('hidden', 'hidden');
       return;
     }
@@ -440,6 +535,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function isStandaloneEnabled() {
+    if (isSeriesDestination()) {
+      return false;
+    }
     return elements.standaloneCheckbox ? elements.standaloneCheckbox.checked : false;
   }
 
@@ -492,6 +590,13 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateStandaloneState() {
     const enabled = isStandaloneEnabled();
 
+    if (elements.standaloneCheckbox) {
+      elements.standaloneCheckbox.disabled = isSeriesDestination();
+      if (isSeriesDestination()) {
+        elements.standaloneCheckbox.checked = false;
+      }
+    }
+
     if (elements.movieNameInput) {
       elements.movieNameInput.disabled = enabled;
       elements.movieNameInput.required = !enabled;
@@ -529,6 +634,82 @@ document.addEventListener('DOMContentLoaded', () => {
     if (elements.movieFeedback) {
       elements.movieFeedback.setAttribute('hidden', 'hidden');
     }
+  }
+
+  function updateDestinationState() {
+    const destination = getDestinationMode();
+    state.destination = destination;
+    const isSeries = destination === 'series';
+
+    if (elements.movieDestinationFields) {
+      if (isSeries) {
+        elements.movieDestinationFields.setAttribute('hidden', 'hidden');
+      } else {
+        elements.movieDestinationFields.removeAttribute('hidden');
+      }
+    }
+    if (elements.seriesDestinationFields) {
+      if (isSeries) {
+        elements.seriesDestinationFields.removeAttribute('hidden');
+      } else {
+        elements.seriesDestinationFields.setAttribute('hidden', 'hidden');
+      }
+    }
+
+    if (elements.movieNameInput) {
+      elements.movieNameInput.required = !isSeries && !isStandaloneEnabled();
+      elements.movieNameInput.disabled = isSeries && !isStandaloneEnabled();
+      if (isSeries) {
+        elements.movieNameInput.value = '';
+      }
+    }
+    if (elements.movieIdInput && isSeries) {
+      elements.movieIdInput.value = '';
+    }
+    if (elements.seriesNameInput) {
+      elements.seriesNameInput.required = isSeries;
+      elements.seriesNameInput.disabled = !isSeries;
+      if (!isSeries) {
+        elements.seriesNameInput.value = '';
+      }
+    }
+    if (elements.seriesIdInput && !isSeries) {
+      elements.seriesIdInput.value = '';
+    }
+    if (elements.seriesSeasonSelect) {
+      elements.seriesSeasonSelect.disabled = !isSeries;
+    }
+    if (elements.seriesVideoTypeSelect) {
+      elements.seriesVideoTypeSelect.disabled = !isSeries;
+    }
+    if (elements.seriesVideoLabelInput) {
+      elements.seriesVideoLabelInput.disabled = !isSeries;
+      if (!isSeries) {
+        elements.seriesVideoLabelInput.value = '';
+      }
+    }
+
+    if (elements.titleInput) {
+      elements.titleInput.disabled = isSeries;
+      if (isSeries) {
+        elements.titleInput.value = '';
+      }
+    }
+    if (elements.yearInput) {
+      elements.yearInput.disabled = isSeries;
+      if (isSeries) {
+        elements.yearInput.value = '';
+      }
+    }
+    if (elements.tmdbInput) {
+      elements.tmdbInput.disabled = isSeries;
+      if (isSeries) {
+        elements.tmdbInput.value = '';
+      }
+    }
+
+    updateStandaloneState();
+    updateExtraVisibility();
   }
 
   function clearMovieSelection() {
@@ -569,6 +750,62 @@ document.addEventListener('DOMContentLoaded', () => {
       clearMovieSelection();
     }
     updateMovieNotFoundPrompt();
+  }
+
+  function clearSeriesSelection() {
+    if (elements.seriesIdInput) elements.seriesIdInput.value = '';
+  }
+
+  function applySeriesOption(option) {
+    if (!option) {
+      clearSeriesSelection();
+      return;
+    }
+    if (elements.seriesIdInput) {
+      elements.seriesIdInput.value = option.getAttribute('data-id') || '';
+    }
+    populateSeasonOptions(option.getAttribute('data-seasons') || '');
+  }
+
+  function populateSeasonOptions(seasonsValue) {
+    if (!elements.seriesSeasonSelect) {
+      return;
+    }
+    const existingValue = elements.seriesSeasonSelect.value;
+    const seasons = new Set([0]);
+    String(seasonsValue || '')
+      .split(',')
+      .map(entry => entry.trim())
+      .forEach(entry => {
+        const parsed = Number(entry);
+        if (Number.isInteger(parsed)) {
+          seasons.add(parsed);
+        }
+      });
+    const sorted = Array.from(seasons).sort((a, b) => a - b);
+    elements.seriesSeasonSelect.innerHTML = '';
+    sorted.forEach(number => {
+      const option = document.createElement('option');
+      option.value = String(number);
+      option.textContent = number === 0 ? 'Series Specials (Season 0)' : `Season ${String(number).padStart(2, '0')}`;
+      elements.seriesSeasonSelect.appendChild(option);
+    });
+    const restored = sorted.map(String).includes(existingValue) ? existingValue : '0';
+    elements.seriesSeasonSelect.value = restored;
+  }
+
+  function syncSeriesSelection() {
+    if (!elements.seriesNameInput) {
+      return;
+    }
+    const value = elements.seriesNameInput.value ? elements.seriesNameInput.value.trim() : '';
+    const option = findMatchingSeriesOption(value);
+    if (option) {
+      applySeriesOption(option);
+    } else {
+      clearSeriesSelection();
+      populateSeasonOptions('0');
+    }
   }
 
   function clearAddMovieSearchTimer() {
@@ -930,6 +1167,41 @@ document.addEventListener('DOMContentLoaded', () => {
     } finally {
       button.disabled = false;
       button.textContent = originalLabel || 'Refresh Library';
+    }
+  }
+
+  async function refreshSeriesLibrary() {
+    if (!elements.refreshSeriesButton) {
+      return;
+    }
+    const button = elements.refreshSeriesButton;
+    const originalLabel = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Refreshing…';
+    appendConsoleLine('Refreshing Sonarr series list…');
+    try {
+      const response = await fetch('/sonarr/series');
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = data && data.error
+          ? data.error
+          : `Failed to refresh Sonarr series (HTTP ${response.status}).`;
+        appendConsoleLine(`ERROR: ${message}`, 'error');
+        return;
+      }
+      const series = Array.isArray(data.series) ? data.series : [];
+      replaceSeriesOptions(series);
+      syncSeriesSelection();
+      state.seriesOptions = series;
+      const count = series.length;
+      const label = count === 1 ? 'series' : 'series';
+      appendConsoleLine(`Loaded ${count} ${label} from Sonarr.`);
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err || 'Unknown error');
+      appendConsoleLine(`ERROR: Failed to refresh Sonarr series: ${message}`, 'error');
+    } finally {
+      button.disabled = false;
+      button.textContent = originalLabel || 'Refresh Series';
     }
   }
 
@@ -1299,6 +1571,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function handleMovieNameInput() {
     syncMovieSelection();
     clearMovieFeedback();
+  }
+
+  function handleSeriesNameInput() {
+    syncSeriesSelection();
   }
 
   function initialiseMovieNotFoundPrompt() {
@@ -1860,6 +2136,16 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!elements.extraFields || !elements.extraCheckbox || !elements.extraNameInput || !elements.extraTypeSelect) {
       return;
     }
+    if (isSeriesDestination()) {
+      elements.extraCheckbox.checked = false;
+      elements.extraCheckbox.disabled = true;
+      elements.extraFields.style.display = 'none';
+      elements.extraNameInput.required = false;
+      elements.extraNameInput.value = '';
+      elements.extraTypeSelect.value = 'trailer';
+      return;
+    }
+    elements.extraCheckbox.disabled = false;
     if (elements.extraCheckbox.checked) {
       elements.extraFields.style.display = 'block';
       elements.extraNameInput.required = true;
@@ -1896,15 +2182,32 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  if (elements.destinationInputs && typeof elements.destinationInputs.forEach === 'function') {
+    elements.destinationInputs.forEach(input => {
+      input.addEventListener('change', () => setDestinationMode(input.value));
+    });
+  }
+
   if (elements.refreshLibraryButton) {
     elements.refreshLibraryButton.addEventListener('click', () => {
       refreshMovieLibrary();
     });
   }
 
+  if (elements.refreshSeriesButton) {
+    elements.refreshSeriesButton.addEventListener('click', () => {
+      refreshSeriesLibrary();
+    });
+  }
+
   if (elements.movieNameInput) {
     elements.movieNameInput.addEventListener('input', handleMovieNameInput);
     elements.movieNameInput.addEventListener('change', handleMovieNameInput);
+  }
+
+  if (elements.seriesNameInput) {
+    elements.seriesNameInput.addEventListener('input', handleSeriesNameInput);
+    elements.seriesNameInput.addEventListener('change', handleSeriesNameInput);
   }
 
   if (elements.standaloneCheckbox) {
@@ -1917,6 +2220,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   initialiseMovieNotFoundPrompt();
   syncMovieSelection();
+  syncSeriesSelection();
+  updateDestinationState();
 
   if (elements.youtubeSearchButton) {
     elements.youtubeSearchButton.addEventListener('click', () => {
@@ -2150,6 +2455,7 @@ document.addEventListener('DOMContentLoaded', () => {
   elements.form.addEventListener('submit', async event => {
     event.preventDefault();
 
+    const destination = getDestinationMode();
     const standaloneEnabled = elements.standaloneCheckbox
       ? elements.standaloneCheckbox.checked
       : false;
@@ -2162,8 +2468,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const payload = {
       yturl: elements.ytInput ? elements.ytInput.value.trim() : '',
+      destination,
       movieName: elements.movieNameInput ? elements.movieNameInput.value.trim() : '',
       movieId: elements.movieIdInput ? elements.movieIdInput.value.trim() : '',
+      seriesName: elements.seriesNameInput ? elements.seriesNameInput.value.trim() : '',
+      seriesId: elements.seriesIdInput ? elements.seriesIdInput.value.trim() : '',
+      seriesSeason: elements.seriesSeasonSelect ? elements.seriesSeasonSelect.value : '0',
+      seriesVideoType: elements.seriesVideoTypeSelect ? elements.seriesVideoTypeSelect.value : 'recap',
+      seriesVideoLabel: elements.seriesVideoLabelInput ? elements.seriesVideoLabelInput.value.trim() : '',
       title: elements.titleInput ? elements.titleInput.value.trim() : '',
       year: elements.yearInput ? elements.yearInput.value.trim() : '',
       tmdb: elements.tmdbInput ? elements.tmdbInput.value.trim() : '',
@@ -2190,19 +2502,29 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (!VIDEO_URL_PATTERN.test(payload.yturl)) {
       errors.push('Please enter a supported video URL (YouTube, Vimeo, or Dailymotion).');
     }
-    if (!payload.movieId && !payload.standalone) {
-      errors.push('Please select a valid movie from the list.');
-    }
-    if (payload.extra && !payload.extra_name) {
-      errors.push('Please provide an extra name.');
-    }
-
-    if (payload.standalone) {
+    if (destination === 'series') {
+      payload.standalone = false;
       payload.extra = false;
       payload.extra_name = '';
       payload.extraType = 'other';
-      if (payload.standalone_name_mode === 'custom' && !payload.standalone_custom_name) {
-        errors.push('Please provide a custom name for the standalone download.');
+      if (!payload.seriesId) {
+        errors.push('Please select a valid series from the list.');
+      }
+    } else {
+      if (!payload.movieId && !payload.standalone) {
+        errors.push('Please select a valid movie from the list.');
+      }
+      if (payload.extra && !payload.extra_name) {
+        errors.push('Please provide an extra name.');
+      }
+
+      if (payload.standalone) {
+        payload.extra = false;
+        payload.extra_name = '';
+        payload.extraType = 'other';
+        if (payload.standalone_name_mode === 'custom' && !payload.standalone_custom_name) {
+          errors.push('Please provide a custom name for the standalone download.');
+        }
       }
     }
 
