@@ -787,7 +787,7 @@ document.addEventListener('DOMContentLoaded', () => {
     sorted.forEach(number => {
       const option = document.createElement('option');
       option.value = String(number);
-      option.textContent = number === 0 ? 'Series Specials (Season 0)' : `Season ${String(number).padStart(2, '0')}`;
+      option.textContent = number === 0 ? 'Series Specials (Season 0)' : `Season ${number}`;
       elements.seriesSeasonSelect.appendChild(option);
     });
     const restored = sorted.map(String).includes(existingValue) ? existingValue : '0';

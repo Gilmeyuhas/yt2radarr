@@ -2052,7 +2052,8 @@ def process_download_job(
 
             ensure_not_cancelled()
 
-            season_folder = "Season 00" if series_season <= 0 else f"Season {series_season:02d}"
+            normalized_season = int(series_season)
+            season_folder = "Season 0" if normalized_season <= 0 else f"Season {normalized_season}"
             target_dir = os.path.join(series_path, season_folder)
             os.makedirs(target_dir, exist_ok=True)
             log(f"Storing video under '{season_folder}'.")
