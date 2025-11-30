@@ -2131,30 +2131,36 @@ def process_download_job(
 
             normalized_season = int(series_season)
             label_source = series_video_label or series_video_type.capitalize()
+            is_recap = series_video_type == "recap"
 
-            if normalized_season <= 0:
-                season_folder = ".extras"
-                target_dir = os.path.join(series_path, season_folder)
-                os.makedirs(target_dir, exist_ok=True)
-                log("Storing special under '.extras'.")
-                series_episode_number = None
-                series_season_number = 0
-                series_label_source = label_source
-                download_dir = target_dir
-            else:
+            if is_recap:
+                if normalized_season <= 0:
+                    fail("Recaps require a season selection. Please choose a season.")
+                    return
                 season_folder = f"Season {normalized_season}"
                 target_dir = os.path.join(series_path, season_folder)
                 os.makedirs(target_dir, exist_ok=True)
-                log(f"Storing video under '{season_folder}'.")
+                log(f"Storing recap under '{season_folder}'.")
 
-                episode_number = _select_series_episode_number(target_dir, normalized_season)
+                series = series or {}
+                series_episode_number = 0
+                series_season_number = normalized_season
+                series_label_source = label_source
+                download_dir = target_dir
+            else:
+                season_folder = "Season 0"
+                target_dir = os.path.join(series_path, season_folder)
+                os.makedirs(target_dir, exist_ok=True)
+                log("Storing special under 'Season 0'.")
+
+                episode_number = _select_series_episode_number(target_dir, 0)
                 log(
                     "Selected episode token "
-                    f"E{episode_number:02d} for season {normalized_season}."
+                    f"E{episode_number:02d} for specials."
                 )
                 series = series or {}
                 series_episode_number = episode_number
-                series_season_number = normalized_season
+                series_season_number = 0
                 series_label_source = label_source
                 download_dir = target_dir
         else:
@@ -2497,7 +2503,7 @@ def process_download_job(
         descriptive = sanitize_filename(descriptive) or default_label
 
         if destination == "series":
-            if series_season_number is not None and series_season_number > 0:
+            if series_season_number is not None and series_season_number >= 0:
                 if series_episode_number is None:
                     series_episode_number = _select_series_episode_number(
                         target_dir, series_season_number

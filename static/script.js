@@ -790,8 +790,45 @@ document.addEventListener('DOMContentLoaded', () => {
       option.textContent = number === 0 ? 'Series Specials (Season 0)' : `Season ${number}`;
       elements.seriesSeasonSelect.appendChild(option);
     });
-    const restored = sorted.map(String).includes(existingValue) ? existingValue : '0';
-    elements.seriesSeasonSelect.value = restored;
+    const videoType = elements.seriesVideoTypeSelect ? elements.seriesVideoTypeSelect.value : 'recap';
+    let restored = sorted.map(String).includes(existingValue) ? existingValue : null;
+    if (videoType === 'special') {
+      restored = '0';
+    } else if (!restored || restored === '0') {
+      const firstSeason = sorted.find(number => number > 0);
+      restored = typeof firstSeason === 'number' ? String(firstSeason) : '0';
+    }
+    elements.seriesSeasonSelect.value = restored || '0';
+    enforceSeriesSeasonRules();
+  }
+
+  function enforceSeriesSeasonRules() {
+    if (!elements.seriesSeasonSelect || !elements.seriesVideoTypeSelect) {
+      return;
+    }
+    const videoType = elements.seriesVideoTypeSelect.value;
+    const isRecap = videoType === 'recap';
+    const options = Array.from(elements.seriesSeasonSelect.options || []);
+
+    options.forEach(option => {
+      if (option.value === '0') {
+        option.disabled = isRecap;
+      } else {
+        option.disabled = false;
+      }
+    });
+
+    if (videoType === 'special') {
+      elements.seriesSeasonSelect.value = '0';
+      return;
+    }
+
+    if (isRecap && elements.seriesSeasonSelect.value === '0') {
+      const firstSeason = options.find(opt => opt.value !== '0' && !opt.disabled);
+      if (firstSeason) {
+        elements.seriesSeasonSelect.value = firstSeason.value;
+      }
+    }
   }
 
   function syncSeriesSelection() {
@@ -2210,6 +2247,12 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.seriesNameInput.addEventListener('change', handleSeriesNameInput);
   }
 
+  if (elements.seriesVideoTypeSelect) {
+    elements.seriesVideoTypeSelect.addEventListener('change', () => {
+      enforceSeriesSeasonRules();
+    });
+  }
+
   if (elements.standaloneCheckbox) {
     elements.standaloneCheckbox.addEventListener('change', updateStandaloneState);
   }
@@ -2222,6 +2265,7 @@ document.addEventListener('DOMContentLoaded', () => {
   syncMovieSelection();
   syncSeriesSelection();
   updateDestinationState();
+  enforceSeriesSeasonRules();
 
   if (elements.youtubeSearchButton) {
     elements.youtubeSearchButton.addEventListener('click', () => {
