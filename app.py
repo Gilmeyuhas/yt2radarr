@@ -118,6 +118,9 @@ def _default_config() -> Dict:
     return {
         "radarr_url": (os.environ.get("RADARR_URL") or "").rstrip("/"),
         "radarr_api_key": os.environ.get("RADARR_API_KEY") or "",
+        "sonarr_url": (os.environ.get("SONARR_URL") or "").rstrip("/"),
+        "sonarr_api_key": os.environ.get("SONARR_API_KEY") or "",
+        "series_paths": [],
         "file_paths": [],
         "path_overrides": [],
         "debug_mode": bool(os.environ.get("YT2RADARR_DEBUG", "").strip()),
@@ -125,7 +128,7 @@ def _default_config() -> Dict:
     }
 
 
-_CACHE: Dict[str, Optional[Any]] = {"config": None, "movies": None}
+_CACHE: Dict[str, Optional[Any]] = {"config": None, "movies": None, "series": None}
 
 jobs_repo = JobRepository(JOBS_PATH, max_items=50)
 
@@ -528,6 +531,13 @@ def _normalize_loaded_config(raw_config: Optional[Dict]) -> Dict:
         os.path.abspath(os.path.expanduser(str(path))) for path in file_paths
     ]
 
+    series_paths = merged.get("series_paths", [])
+    if not isinstance(series_paths, list):
+        series_paths = [str(series_paths)] if series_paths else []
+    merged["series_paths"] = [
+        os.path.abspath(os.path.expanduser(str(path))) for path in series_paths
+    ]
+
     overrides_raw = merged.get("path_overrides", [])
     if not isinstance(overrides_raw, list):
         overrides_raw = []
@@ -578,6 +588,7 @@ def save_config(config: Dict) -> None:
         json.dump(config, handle, indent=2)
     _CACHE["config"] = config
     _CACHE["movies"] = None
+    _CACHE["series"] = None
 
 
 def is_configured(config: Optional[Dict] = None) -> bool:
@@ -733,6 +744,26 @@ def get_all_movies() -> List[Dict]:
         return []
 
 
+def get_all_series() -> List[Dict]:
+    """Fetch all series from Sonarr and cache the results."""
+
+    cached_series = _CACHE.get("series")
+    if isinstance(cached_series, list):
+        return cached_series
+
+    config = load_config()
+    if not (config.get("sonarr_url") and config.get("sonarr_api_key")):
+        return []
+
+    try:
+        series_list = _fetch_sonarr_series(config)
+        _CACHE["series"] = series_list
+        return series_list
+    except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network errors
+        print(f"Error fetching series from Sonarr: {exc}")
+        return []
+
+
 def _fetch_radarr_movies(config: Dict) -> List[Dict]:
     """Return the full list of movies from Radarr sorted alphabetically."""
 
@@ -747,6 +778,21 @@ def _fetch_radarr_movies(config: Dict) -> List[Dict]:
         raise ValueError("Radarr returned an invalid movie list.")
     movies.sort(key=lambda movie: str(movie.get("title", "")).lower())
     return movies
+
+
+def _fetch_sonarr_series(config: Dict) -> List[Dict]:
+    """Return the full list of series from Sonarr sorted alphabetically."""
+
+    response = _sonarr_request("GET", "/api/v3/series", config=config)
+    series_list = response.json()
+    if not isinstance(series_list, list):
+        raise ValueError("Sonarr returned an invalid series list.")
+
+    def _series_sort_key(series: Dict[str, Any]) -> str:
+        return str(series.get("title", "")).lower()
+
+    series_list.sort(key=_series_sort_key)
+    return series_list
 
 
 def _radarr_headers(config: Dict) -> Dict[str, str]:
@@ -771,6 +817,43 @@ def _radarr_request(
 
     url = f"{cfg['radarr_url']}{path}"
     headers = _radarr_headers(cfg)
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+
+    response = requests.request(
+        method.upper(),
+        url,
+        headers=headers,
+        params=params,
+        json=payload,
+        timeout=10,
+    )
+    response.raise_for_status()
+    return response
+
+
+def _sonarr_headers(config: Dict) -> Dict[str, str]:
+    """Return request headers required for Sonarr API calls."""
+
+    return {"X-Api-Key": config["sonarr_api_key"]}
+
+
+def _sonarr_request(
+    method: str,
+    path: str,
+    *,
+    config: Optional[Dict] = None,
+    params: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> requests.Response:
+    """Execute a Sonarr API request and raise for HTTP errors."""
+
+    cfg = config or load_config()
+    if not (cfg.get("sonarr_url") and cfg.get("sonarr_api_key")):
+        raise RuntimeError("Sonarr has not been configured.")
+
+    url = f"{cfg['sonarr_url']}{path}"
+    headers = _sonarr_headers(cfg)
     if payload is not None:
         headers["Content-Type"] = "application/json"
 
@@ -900,6 +983,76 @@ def build_movie_stem(movie: Dict) -> str:
     return cleaned or "Movie"
 
 
+def _select_series_episode_number(
+    target_dir: str, season_number: int, preferred: int = 99, minimum: int = 90
+) -> int:
+    """Return an episode number for a series download that avoids collisions.
+
+    The function prefers a high, non-conflicting special episode index (default
+    99) and increments above the highest used value when necessary so multiple
+    specials in the same season do not overwrite each other.
+    """
+
+    try:
+        normalized_season = max(int(season_number), 0)
+    except (TypeError, ValueError):
+        normalized_season = 0
+
+    if preferred < minimum:
+        preferred = minimum
+
+    pattern = re.compile(rf"S{normalized_season:02d}E(\d+)", re.IGNORECASE)
+    used_numbers: List[int] = []
+
+    try:
+        if os.path.isdir(target_dir):
+            for entry in os.scandir(target_dir):
+                if entry.is_dir():
+                    continue
+                match = pattern.search(entry.name)
+                if match:
+                    try:
+                        used_numbers.append(int(match.group(1)))
+                    except (TypeError, ValueError):
+                        continue
+    except OSError:
+        used_numbers = []
+
+    if preferred not in used_numbers:
+        return preferred
+
+    highest_used = max(used_numbers or [preferred])
+    candidate = max(highest_used, preferred, minimum) + 1
+    return candidate
+
+
+def build_series_stem(
+    series: Dict, season_number: int, label: str = "Special", episode_number: Optional[int] = None
+) -> str:
+    """Return a canonical series stem for Sonarr downloads."""
+
+    title = str(series.get("title") or "Series").strip()
+    try:
+        normalized_season = int(season_number)
+    except (TypeError, ValueError):
+        normalized_season = 0
+    season_token = f"S{max(normalized_season, 0):02d}"
+
+    try:
+        normalized_episode = int(episode_number) if episode_number is not None else None
+    except (TypeError, ValueError):
+        normalized_episode = None
+    if normalized_episode is None or normalized_episode < 0:
+        normalized_episode = 99
+
+    episode_token = f"E{normalized_episode:02d}"
+    label_token = sanitize_filename(label or "Special")
+    parts = [title, "-", f"{season_token}{episode_token}", "-", label_token]
+    stem = " ".join(parts)
+    cleaned = sanitize_filename(stem)
+    return cleaned or "Series Special"
+
+
 def resolve_movie_by_metadata(
     movie_id: str,
     tmdb: str,
@@ -977,6 +1130,7 @@ def normalize_extra_type_key(raw_value: str) -> Optional[str]:
 
 def _describe_job(payload: Dict) -> Dict:
     """Build presentation metadata for a job payload."""
+    destination = (payload.get("destination") or "movie").strip().lower()
     movie_label = (payload.get("movieName") or payload.get("title") or "").strip()
     standalone = bool(payload.get("standalone"))
     standalone_name_mode = (payload.get("standalone_name_mode") or "youtube").strip().lower()
@@ -991,7 +1145,7 @@ def _describe_job(payload: Dict) -> Dict:
             movie_label = override_title
     if not standalone and movie_label == "Standalone Download":
         movie_label = "Selected Movie"
-    extra = bool(payload.get("extra"))
+    extra = bool(payload.get("extra")) and destination != "series"
     extra_type = (payload.get("extraType") or "trailer").strip().lower()
     extra_name = (payload.get("extra_name") or "").strip()
     merge_playlist = bool(payload.get("merge_playlist"))
@@ -1002,7 +1156,16 @@ def _describe_job(payload: Dict) -> Dict:
     if playlist_mode == "merge":
         merge_playlist = True
     extra_label = extra_name or EXTRA_TYPE_LABELS.get(extra_type, extra_type.capitalize())
-    if extra and extra_label:
+    if destination == "series":
+        series_label = (payload.get("seriesName") or "").strip() or "Selected Series"
+        season_number = payload.get("seriesSeason")
+        season_label = "Series Specials" if season_number in (None, "", 0) else f"Season {season_number}"
+        series_video_label = (payload.get("seriesVideoLabel") or "").strip()
+        series_video_type = (payload.get("seriesVideoType") or "recap").strip().capitalize()
+        presented_label = series_video_label or series_video_type
+        label = f"{series_label} – {presented_label}"
+        subtitle = f"Sonarr • {season_label}" if season_label else "Sonarr"
+    elif extra and extra_label:
         label = f"{movie_label} – {extra_label}"
         subtitle = f"Extra • {extra_label}"
     else:
@@ -1015,6 +1178,8 @@ def _describe_job(payload: Dict) -> Dict:
         metadata.append("Playlist merged into single file")
     if standalone:
         metadata.append("Standalone download (outside Radarr)")
+    if destination == "series":
+        metadata.append("Sonarr series special")
     return {"label": label or "Radarr Download", "subtitle": subtitle, "metadata": metadata}
 
 
@@ -1072,6 +1237,15 @@ def _validate_movie_selection(data: Dict, error: Callable[[str], None]) -> str:
     return movie_id
 
 
+def _validate_series_selection(data: Dict, error: Callable[[str], None]) -> str:
+    """Ensure a series has been chosen from the suggestions list."""
+
+    series_id = (data.get("seriesId") or "").strip()
+    if not series_id:
+        error("No series selected. Please choose a series from the suggestions list.")
+    return series_id
+
+
 def _resolve_playlist_mode(data: Dict, error: Callable[[str], None]) -> str:
     """Return the requested playlist handling mode."""
 
@@ -1103,26 +1277,45 @@ def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
 
     playlist_mode = _resolve_playlist_mode(data, error)
 
-    standalone = bool(data.get("standalone"))
+    destination = (data.get("destination") or "movie").strip().lower()
+    if destination not in {"movie", "series"}:
+        destination = "movie"
+
+    standalone = bool(data.get("standalone")) and destination != "series"
 
     extra_requested, extra_name, selected_extra_type = _resolve_extra_settings(
         data, error
     )
 
-    if standalone:
+    if standalone or destination == "series":
         extra_requested = False
         extra_name = ""
         selected_extra_type = "other"
 
-    if standalone:
+    series_id = ""
+    if destination == "series":
+        series_id = _validate_series_selection(data, error)
+        movie_id = ""
+    elif standalone:
         movie_id = (data.get("movieId") or "").strip()
     else:
         movie_id = _validate_movie_selection(data, error)
+
+    try:
+        season_number = int(data.get("seriesSeason", 0))
+    except (TypeError, ValueError):
+        season_number = 0
 
     return {
         "yturl": _validate_request_urls(data, error),
         "movieId": movie_id,
         "movieName": (data.get("movieName") or "").strip(),
+        "destination": destination,
+        "seriesId": series_id,
+        "seriesName": (data.get("seriesName") or "").strip(),
+        "seriesSeason": season_number,
+        "seriesVideoType": (data.get("seriesVideoType") or "recap").strip().lower(),
+        "seriesVideoLabel": (data.get("seriesVideoLabel") or "").strip(),
         "title": (data.get("title") or "").strip(),
         "year": (data.get("year") or "").strip(),
         "tmdb": (data.get("tmdb") or "").strip(),
@@ -1154,6 +1347,26 @@ def _format_quality_profile(entry: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": entry.get("id"),
         "name": entry.get("name") or f"Profile {entry.get('id')}",
+    }
+
+
+def _format_sonarr_series_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalise a Sonarr series entry for the UI."""
+
+    seasons: List[int] = []
+    for season in entry.get("seasons", []) or []:
+        try:
+            season_number = int(season.get("seasonNumber"))
+        except (TypeError, ValueError):
+            continue
+        seasons.append(season_number)
+
+    return {
+        "id": entry.get("id"),
+        "title": entry.get("title") or "Series",
+        "year": entry.get("year"),
+        "tvdbId": entry.get("tvdbId"),
+        "seasons": sorted(seasons),
     }
 
 
@@ -1224,8 +1437,41 @@ def radarr_options():
     )
 
 
+@app.route("/sonarr/series", methods=["GET"])
+def sonarr_series() -> Response:
+    """Return the cached list of Sonarr series."""
+
+    try:
+        config = _require_sonarr_configured()
+    except SonarrRequestError as exc:
+        return _json_error(exc.message, exc.status)
+
+    try:
+        series_entries = _fetch_sonarr_series(config)
+        _CACHE["series"] = series_entries
+    except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network errors
+        print(f"Failed to load Sonarr series list: {exc}")
+        return _json_error("Failed to load Sonarr series list.", 502)
+
+    payload: List[Dict[str, Any]] = []
+    for entry in series_entries:
+        if isinstance(entry, dict):
+            payload.append(_format_sonarr_series_entry(entry))
+
+    return jsonify({"series": payload})
+
+
 class RadarrRequestError(Exception):
     """Raised when a Radarr integration call cannot be completed."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+class SonarrRequestError(Exception):
+    """Raised when a Sonarr integration call cannot be completed."""
 
     def __init__(self, message: str, status: int) -> None:
         super().__init__(message)
@@ -1255,6 +1501,22 @@ def _require_configured() -> Dict:
     config = load_config()
     if not is_configured(config):
         raise RadarrRequestError("Application has not been configured yet.", 503)
+    return config
+
+
+def _require_sonarr_configured() -> Dict:
+    """Ensure Sonarr credentials are available before performing Sonarr calls."""
+
+    config = load_config()
+    if not (
+        config.get("sonarr_url")
+        and config.get("sonarr_api_key")
+        and (config.get("series_paths") or config.get("file_paths"))
+    ):
+        raise SonarrRequestError(
+            "Sonarr connection details are missing.",
+            503,
+        )
     return config
 
 
@@ -1590,10 +1852,12 @@ def radarr_add_movie():
 def index():
     """Render the main application interface."""
     movies = get_all_movies()
+    series = get_all_series()
     config = load_config()
     return render_template(
         "index.html",
         movies=movies,
+        series=series,
         configured=is_configured(config),
         debug_mode=config.get("debug_mode", False),
     )
@@ -1718,7 +1982,12 @@ def process_download_job(
         payload["playlist_mode"] = playlist_mode
         payload["merge_playlist"] = merge_playlist
 
-        standalone = bool(payload.get("standalone"))
+        destination = (payload.get("destination") or "movie").strip().lower()
+        if destination not in {"movie", "series"}:
+            destination = "movie"
+        payload["destination"] = destination
+
+        standalone = bool(payload.get("standalone")) and destination != "series"
         payload["standalone"] = standalone
 
         standalone_name_mode = (
@@ -1735,6 +2004,20 @@ def process_download_job(
             standalone_name_mode = "youtube"
         payload["standalone_name_mode"] = standalone_name_mode
         payload["standalone_custom_name"] = standalone_custom_name
+
+        series_id = (payload.get("seriesId") or "").strip()
+        series_name = (payload.get("seriesName") or "").strip()
+        try:
+            series_season = int(payload.get("seriesSeason", 0))
+        except (TypeError, ValueError):
+            series_season = 0
+        series_video_type = (payload.get("seriesVideoType") or "recap").strip().lower()
+        series_video_label = (payload.get("seriesVideoLabel") or "").strip()
+        payload["seriesId"] = series_id
+        payload["seriesName"] = series_name
+        payload["seriesSeason"] = series_season
+        payload["seriesVideoType"] = series_video_type
+        payload["seriesVideoLabel"] = series_video_label
 
         extra_type = (payload.get("extraType") or "trailer").strip().lower()
         allowed_extra_types = {
@@ -1786,6 +2069,60 @@ def process_download_job(
             log(f"Standalone base path resolved to '{standalone_base_path}'.")
             target_dir = standalone_base_path
             _job_status(job_id, "processing", progress=10)
+        elif destination == "series":
+            if not series_id:
+                fail("No series selected. Please choose a series from the suggestions list.")
+                return
+            try:
+                _require_sonarr_configured()
+            except SonarrRequestError as exc:
+                fail(exc.message)
+                return
+            try:
+                log(f"Fetching Sonarr details for series ID {series_id}.")
+                response = _sonarr_request(
+                    "GET", f"/api/v3/series/{series_id}", config=config
+                )
+                response.raise_for_status()
+                series = response.json()
+            except (requests.RequestException, ValueError) as exc:  # pragma: no cover - network errors
+                fail(f"Could not retrieve series info from Sonarr (ID {series_id}): {exc}")
+                return
+
+            series_path = series.get("path")
+            resolved_path, created_folder = resolve_movie_path(
+                series_path,
+                config,
+                create_if_missing=True,
+                library_paths=config.get("series_paths") or config.get("file_paths"),
+            )
+            if resolved_path is None:
+                fail(f"Series folder not found on disk: {series_path}")
+                return
+            series_path = resolved_path
+            if created_folder:
+                log(f"Created series folder at '{series_path}'.")
+            log(f"Series path resolved to '{series_path}'.")
+            _job_status(job_id, "processing", progress=10)
+
+            ensure_not_cancelled()
+
+            normalized_season = int(series_season)
+            season_folder = "Season 0" if normalized_season <= 0 else f"Season {normalized_season}"
+            target_dir = os.path.join(series_path, season_folder)
+            os.makedirs(target_dir, exist_ok=True)
+            log(f"Storing video under '{season_folder}'.")
+
+            label_source = series_video_label or series_video_type.capitalize()
+            episode_number = _select_series_episode_number(target_dir, normalized_season)
+            log(
+                "Selected episode token "
+                f"E{episode_number:02d} for season {normalized_season}."
+            )
+            canonical_stem = build_series_stem(
+                series, series_season, label_source, episode_number=episode_number
+            )
+            download_dir = target_dir
         else:
             resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
             if resolved is None or not str(resolved.get("id")):
@@ -2751,6 +3088,7 @@ def resolve_movie_path(
     config: Dict,
     *,
     create_if_missing: bool = False,
+    library_paths: Optional[Iterable[str]] = None,
 ) -> Tuple[Optional[str], bool]:
     """Resolve a movie folder path using configured library paths.
 
@@ -2802,7 +3140,7 @@ def resolve_movie_path(
         if folder_name:
             resolved_path = _resolve_library_target(
                 folder_name,
-                config.get("file_paths", []),
+                library_paths or config.get("file_paths", []),
                 ensure_candidate,
             )
 
@@ -2825,8 +3163,12 @@ def setup():
     if request.method == "POST":
         radarr_url = (request.form.get("radarr_url") or "").strip().rstrip("/")
         api_key = (request.form.get("radarr_api_key") or "").strip()
+        sonarr_url = (request.form.get("sonarr_url") or "").strip().rstrip("/")
+        sonarr_api_key = (request.form.get("sonarr_api_key") or "").strip()
         raw_paths = request.form.get("file_paths") or ""
         file_paths = normalize_paths(raw_paths)
+        raw_series_paths = request.form.get("series_paths") or ""
+        series_paths = normalize_paths(raw_series_paths)
         raw_overrides = request.form.get("path_overrides") or ""
         overrides_text = raw_overrides
         override_entries, override_errors = parse_path_overrides(raw_overrides)
@@ -2846,11 +3188,24 @@ def setup():
             errors.append("Radarr API key is required.")
         if not file_paths:
             errors.append("At least one library path is required.")
+        if (sonarr_url or sonarr_api_key) and not (series_paths or file_paths):
+            errors.append(
+                "Add a series library path for Sonarr, or reuse an existing movie library path."
+            )
+        if sonarr_url and not re.match(r"^https?://", sonarr_url):
+            errors.append("Sonarr URL must start with http:// or https://.")
+        if sonarr_url and not sonarr_api_key:
+            errors.append("Sonarr API key is required when providing a Sonarr URL.")
+        if sonarr_api_key and not sonarr_url:
+            errors.append("Sonarr URL is required when providing a Sonarr API key.")
 
         config.update(
             {
                 "radarr_url": radarr_url,
                 "radarr_api_key": api_key,
+                "sonarr_url": sonarr_url,
+                "sonarr_api_key": sonarr_api_key,
+                "series_paths": series_paths,
                 "file_paths": file_paths,
                 "path_overrides": overrides,
                 "debug_mode": debug_mode,

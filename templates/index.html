@@ -53,6 +53,20 @@
       <div class="main-column">
         <form id="movieForm" novalidate>
           <div class="form-group">
+            <label for="destinationMovie">Destination</label>
+            <div class="segmented-control" role="group" aria-label="Destination">
+              <label class="segmented-option">
+                <input type="radio" name="destination" id="destinationMovie" value="movie" checked />
+                <span>Movie (Radarr)</span>
+              </label>
+              <label class="segmented-option">
+                <input type="radio" name="destination" id="destinationSeries" value="series" />
+                <span>Series Special (Sonarr)</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-group">
             <label for="yturl">Video URL</label>
             <div class="youtube-input-wrapper">
               <input
@@ -69,68 +83,126 @@
             </div>
           </div>
 
-          <div class="form-group">
-            <label for="movieName">Movie</label>
-            <div class="movie-input-wrapper">
-              <input
-                list="movieOptions"
-                id="movieName"
-                name="movieName"
-                placeholder="Start typing movie title..."
-                autocomplete="off"
-                required
-              />
-              <button type="button" class="button-secondary" id="refreshLibraryButton">
-                Refresh Library
+          <div id="movieDestinationFields">
+            <div class="form-group">
+              <label for="movieName">Movie</label>
+              <div class="movie-input-wrapper">
+                <input
+                  list="movieOptions"
+                  id="movieName"
+                  name="movieName"
+                  placeholder="Start typing movie title..."
+                  autocomplete="off"
+                  required
+                />
+                <button type="button" class="button-secondary" id="refreshLibraryButton">
+                  Refresh Movies
+                </button>
+                <datalist id="movieOptions">
+                  {% for movie in movies %}
+                    <option
+                      data-id="{{ movie['id'] }}"
+                      data-title="{{ movie['title'] }}"
+                      data-year="{{ movie.get('year', '') }}"
+                      data-tmdb="{{ movie.get('tmdbId', '') }}"
+                      value="{{ movie['title'] }}{% if movie.get('year') %} ({{ movie['year'] }}){% endif %}"
+                    ></option>
+                  {% endfor %}
+                </datalist>
+              </div>
+            </div>
+            <input type="hidden" id="movieId" name="movieId" />
+
+            <div class="movie-feedback" id="movieFeedback" role="status" aria-live="polite" hidden></div>
+
+            <div class="movie-not-found" id="movieNotFoundPrompt" hidden>
+              <span>Movie not found. Add to Radarr?</span>
+              <button type="button" class="button-ghost" id="movieNotFoundButton">
+                Yes, search Radarr
               </button>
-              <datalist id="movieOptions">
-                {% for movie in movies %}
-                  <option
-                    data-id="{{ movie['id'] }}"
-                    data-title="{{ movie['title'] }}"
-                    data-year="{{ movie.get('year', '') }}"
-                    data-tmdb="{{ movie.get('tmdbId', '') }}"
-                    value="{{ movie['title'] }}{% if movie.get('year') %} ({{ movie['year'] }}){% endif %}"
-                  ></option>
-                {% endfor %}
-              </datalist>
             </div>
-          </div>
-          <input type="hidden" id="movieId" name="movieId" />
 
-          <div class="movie-feedback" id="movieFeedback" role="status" aria-live="polite" hidden></div>
-
-          <div class="movie-not-found" id="movieNotFoundPrompt" hidden>
-            <span>Movie not found. Add to Radarr?</span>
-            <button type="button" class="button-ghost" id="movieNotFoundButton">
-              Yes, search Radarr
-            </button>
-          </div>
-
-          <div class="form-check">
-            <input type="checkbox" id="standalone" name="standalone" />
-            <label for="standalone">Download without Radarr (create standalone folder)</label>
-          </div>
-          <p class="help-text" id="standaloneHelp">
-            By default, we'll create a folder using the video title inside your first
-            configured library path.
-          </p>
-          <div class="standalone-options" id="standaloneNamingOptions" hidden>
             <div class="form-check">
-              <input type="checkbox" id="standaloneCustomNameToggle" name="standaloneCustomNameToggle" />
-              <label for="standaloneCustomNameToggle">Use a custom folder and filename</label>
+              <input type="checkbox" id="standalone" name="standalone" />
+              <label for="standalone">Download without Radarr (create standalone folder)</label>
             </div>
-            <div class="form-group" id="standaloneCustomNameGroup" hidden>
-              <label for="standaloneCustomName">Custom Name</label>
+            <p class="help-text" id="standaloneHelp">
+              By default, we'll create a folder using the video title inside your first
+              configured library path.
+            </p>
+            <div class="standalone-options" id="standaloneNamingOptions" hidden>
+              <div class="form-check">
+                <input type="checkbox" id="standaloneCustomNameToggle" name="standaloneCustomNameToggle" />
+                <label for="standaloneCustomNameToggle">Use a custom folder and filename</label>
+              </div>
+              <div class="form-group" id="standaloneCustomNameGroup" hidden>
+                <label for="standaloneCustomName">Custom Name</label>
+                <input
+                  type="text"
+                  id="standaloneCustomName"
+                  name="standaloneCustomName"
+                  placeholder="Folder and video name"
+                />
+                <p class="help-text">
+                  We'll create the folder and saved video file using this name.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div id="seriesDestinationFields" hidden>
+            <div class="form-group">
+              <label for="seriesName">Series</label>
+              <div class="movie-input-wrapper">
+                <input
+                  list="seriesOptions"
+                  id="seriesName"
+                  name="seriesName"
+                  placeholder="Start typing series title..."
+                  autocomplete="off"
+                />
+                <button type="button" class="button-secondary" id="refreshSeriesButton">
+                  Refresh Series
+                </button>
+                <datalist id="seriesOptions">
+                  {% for show in series %}
+                    <option
+                      data-id="{{ show['id'] }}"
+                      data-title="{{ show['title'] }}"
+                      data-year="{{ show.get('year', '') }}"
+                      data-seasons="{{ show.get('seasons', [])|join(',') }}"
+                      value="{{ show['title'] }}{% if show.get('year') %} ({{ show['year'] }}){% endif %}"
+                    ></option>
+                  {% endfor %}
+                </datalist>
+              </div>
+            </div>
+            <input type="hidden" id="seriesId" name="seriesId" />
+
+            <div class="form-group">
+              <label for="seriesSeason">Season Target</label>
+              <select id="seriesSeason" name="seriesSeason">
+                <option value="0">Series Specials (Season 0)</option>
+              </select>
+              <p class="help-text">Choose the season folder to store the recap or special.</p>
+            </div>
+
+            <div class="form-group">
+              <label for="seriesVideoType">Video Type</label>
+              <select id="seriesVideoType" name="seriesVideoType">
+                <option value="recap">Recap</option>
+                <option value="special">Special</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="seriesVideoLabel">Custom Label (optional)</label>
               <input
                 type="text"
-                id="standaloneCustomName"
-                name="standaloneCustomName"
-                placeholder="Folder and video name"
+                id="seriesVideoLabel"
+                name="seriesVideoLabel"
+                placeholder="e.g., Season 3 Recap"
               />
-              <p class="help-text">
-                We'll create the folder and saved video file using this name.
-              </p>
             </div>
           </div>
 
