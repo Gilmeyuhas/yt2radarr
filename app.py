@@ -2,7 +2,6 @@
 
 # pylint: disable=too-many-lines
 
-import html
 import itertools
 import json
 import os
@@ -990,8 +989,8 @@ def _select_series_episode_number(
     """Return an episode number for a series download that avoids collisions.
 
     Specials (Season 0) are numbered incrementally based on existing files in
-    the Season 0 directory. Other seasons retain the legacy collision avoidance
-    behaviour.
+    the Season 0 directory, starting at episode 900. Other seasons retain the
+    legacy collision avoidance behaviour.
     """
 
     try:
@@ -1001,7 +1000,7 @@ def _select_series_episode_number(
     normalized_season = max(normalized_season, 0)
 
     if normalized_season == 0:
-        pattern = re.compile(r"S00E(\d{2})", re.IGNORECASE)
+        pattern = re.compile(r"S00E(\d+)", re.IGNORECASE)
         special_count = 0
 
         try:
@@ -1014,7 +1013,7 @@ def _select_series_episode_number(
         except OSError:
             special_count = 0
 
-        return special_count + 1
+        return 900 + special_count
 
     if preferred < minimum:
         preferred = minimum
@@ -2081,7 +2080,6 @@ def process_download_job(
         series_episode_number: Optional[int] = None
         series_season_number: Optional[int] = None
         series_label_source = ""
-        original_title_for_nfo = ""
         series_stem_label = ""
 
         if standalone:
@@ -2460,8 +2458,6 @@ def process_download_job(
 
         if info_payload:
             youtube_title_for_metadata = str(info_payload.get("title") or "")
-            if youtube_title_for_metadata:
-                original_title_for_nfo = youtube_title_for_metadata
 
         if not descriptive:
             candidate_title = ""
@@ -2478,8 +2474,6 @@ def process_download_job(
             candidate_title = candidate_title.strip()
             if candidate_title:
                 descriptive = candidate_title
-                if not original_title_for_nfo:
-                    original_title_for_nfo = candidate_title
                 log(f"Using YouTube title '{descriptive}'.")
             else:
                 descriptive = default_label
@@ -2488,9 +2482,6 @@ def process_download_job(
                     f"yt-dlp did not provide a {subject} title. "
                     f"Using fallback name '{default_label}'."
                 )
-
-        if not original_title_for_nfo:
-            original_title_for_nfo = descriptive or youtube_title_for_metadata or default_label
 
         descriptive = sanitize_filename(descriptive) or default_label
 
@@ -2981,54 +2972,6 @@ def process_download_job(
             except OSError:
                 pass
             raise JobCancelled()
-
-        episode_number_for_nfo: Optional[int] = series_episode_number
-        if destination == "series":
-            if episode_number_for_nfo is None:
-                match = re.search(
-                    r"S00E(\d{2})",
-                    os.path.basename(canonical_path),
-                    re.IGNORECASE,
-                )
-                if match:
-                    try:
-                        episode_number_for_nfo = int(match.group(1))
-                    except (TypeError, ValueError):
-                        episode_number_for_nfo = None
-
-            if (
-                series_season_number is not None
-                and series_season_number <= 0
-                and episode_number_for_nfo is None
-            ):
-                episode_number_for_nfo = _select_series_episode_number(
-                    target_dir, series_season_number
-                )
-
-        if (
-            destination == "series"
-            and series_season_number is not None
-            and series_season_number <= 0
-            and episode_number_for_nfo is not None
-        ):
-            nfo_path = os.path.splitext(canonical_path)[0] + ".nfo"
-            title_value = series_stem_label or os.path.splitext(canonical_filename)[0]
-            plot_value = original_title_for_nfo or title_value
-            episode_value = max(int(episode_number_for_nfo), 1)
-            nfo_body = (
-                "<episodedetails>\n"
-                f"  <title>{html.escape(title_value)}</title>\n"
-                "  <season>0</season>\n"
-                f"  <episode>{episode_value}</episode>\n"
-                f"  <plot>{html.escape(plot_value)}</plot>\n"
-                "</episodedetails>\n"
-            )
-            try:
-                with open(nfo_path, "w", encoding="utf-8") as nfo_file:
-                    nfo_file.write(nfo_body)
-                log(f"Wrote companion NFO '{os.path.basename(nfo_path)}'.")
-            except OSError as exc:
-                warn(f"Failed to write NFO file '{nfo_path}': {exc}")
 
         for leftover in downloaded_candidates:
             if os.path.abspath(leftover) == os.path.abspath(target_path):
