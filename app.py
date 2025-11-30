@@ -2983,17 +2983,27 @@ def process_download_job(
             raise JobCancelled()
 
         episode_number_for_nfo: Optional[int] = series_episode_number
-        if episode_number_for_nfo is None and destination == "series":
-            match = re.search(
-                r"S00E(\d{2})",
-                os.path.basename(canonical_path),
-                re.IGNORECASE,
-            )
-            if match:
-                try:
-                    episode_number_for_nfo = int(match.group(1))
-                except (TypeError, ValueError):
-                    episode_number_for_nfo = None
+        if destination == "series":
+            if episode_number_for_nfo is None:
+                match = re.search(
+                    r"S00E(\d{2})",
+                    os.path.basename(canonical_path),
+                    re.IGNORECASE,
+                )
+                if match:
+                    try:
+                        episode_number_for_nfo = int(match.group(1))
+                    except (TypeError, ValueError):
+                        episode_number_for_nfo = None
+
+            if (
+                series_season_number is not None
+                and series_season_number <= 0
+                and episode_number_for_nfo is None
+            ):
+                episode_number_for_nfo = _select_series_episode_number(
+                    target_dir, series_season_number
+                )
 
         if (
             destination == "series"
