@@ -987,12 +987,14 @@ def build_series_stem(series: Dict, season_number: int, label: str = "Special") 
     """Return a canonical series stem for Sonarr downloads."""
 
     title = str(series.get("title") or "Series").strip()
-    tvdb_id = str(series.get("tvdbId") or "").strip()
-    season_token = f"S{int(season_number):02d}" if season_number >= 0 else "S00"
+    try:
+        normalized_season = int(season_number)
+    except (TypeError, ValueError):
+        normalized_season = 0
+    season_token = f"S{max(normalized_season, 0):02d}"
+    episode_token = "E99"
     label_token = sanitize_filename(label or "Special")
-    parts = [title, "-", season_token, label_token]
-    if tvdb_id:
-        parts.append(f"{{tvdb-{tvdb_id}}}")
+    parts = [title, "-", f"{season_token}{episode_token}", "-", label_token]
     stem = " ".join(parts)
     cleaned = sanitize_filename(stem)
     return cleaned or "Series Special"
