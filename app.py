@@ -2,6 +2,7 @@
 
 # pylint: disable=too-many-lines
 
+import html
 import itertools
 import json
 import os
@@ -988,15 +989,32 @@ def _select_series_episode_number(
 ) -> int:
     """Return an episode number for a series download that avoids collisions.
 
-    The function prefers a high, non-conflicting special episode index (default
-    99) and increments above the highest used value when necessary so multiple
-    specials in the same season do not overwrite each other.
+    Specials (Season 0) are numbered incrementally based on existing files in
+    the Season 0 directory. Other seasons retain the legacy collision avoidance
+    behaviour.
     """
 
     try:
-        normalized_season = max(int(season_number), 0)
+        normalized_season = int(season_number)
     except (TypeError, ValueError):
         normalized_season = 0
+    normalized_season = max(normalized_season, 0)
+
+    if normalized_season == 0:
+        pattern = re.compile(r"S00E(\d{2})", re.IGNORECASE)
+        special_count = 0
+
+        try:
+            if os.path.isdir(target_dir):
+                for entry in os.scandir(target_dir):
+                    if entry.is_dir():
+                        continue
+                    if pattern.search(entry.name):
+                        special_count += 1
+        except OSError:
+            special_count = 0
+
+        return special_count + 1
 
     if preferred < minimum:
         preferred = minimum
@@ -2055,10 +2073,16 @@ def process_download_job(
         jobs_repo.update(job_id, {"request": payload})
 
         movie: Dict[str, Any] = {}
+        series: Dict[str, Any] = {}
         target_dir = ""
         canonical_stem = ""
         standalone_base_path: Optional[str] = None
         download_dir: Optional[str] = None
+        series_episode_number: Optional[int] = None
+        series_season_number: Optional[int] = None
+        series_label_source = ""
+        original_title_for_nfo = ""
+        series_stem_label = ""
 
         if standalone:
             standalone_base_path = _select_standalone_library_path(config)
@@ -2119,9 +2143,10 @@ def process_download_job(
                 "Selected episode token "
                 f"E{episode_number:02d} for season {normalized_season}."
             )
-            canonical_stem = build_series_stem(
-                series, series_season, label_source, episode_number=episode_number
-            )
+            series = series or {}
+            series_episode_number = episode_number
+            series_season_number = normalized_season
+            series_label_source = label_source
             download_dir = target_dir
         else:
             resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
@@ -2207,6 +2232,7 @@ def process_download_job(
             log(f"Using custom descriptive name '{descriptive}'.")
 
         info_payload: Optional[Dict] = None
+        youtube_title_for_metadata = ""
 
         if shutil.which("ffmpeg") is None:
             warn(
@@ -2432,6 +2458,11 @@ def process_download_job(
         else:
             log("yt-dlp did not report a resolved format; proceeding with download.")
 
+        if info_payload:
+            youtube_title_for_metadata = str(info_payload.get("title") or "")
+            if youtube_title_for_metadata:
+                original_title_for_nfo = youtube_title_for_metadata
+
         if not descriptive:
             candidate_title = ""
             if info_payload:
@@ -2447,6 +2478,8 @@ def process_download_job(
             candidate_title = candidate_title.strip()
             if candidate_title:
                 descriptive = candidate_title
+                if not original_title_for_nfo:
+                    original_title_for_nfo = candidate_title
                 log(f"Using YouTube title '{descriptive}'.")
             else:
                 descriptive = default_label
@@ -2456,7 +2489,20 @@ def process_download_job(
                     f"Using fallback name '{default_label}'."
                 )
 
+        if not original_title_for_nfo:
+            original_title_for_nfo = descriptive or youtube_title_for_metadata or default_label
+
         descriptive = sanitize_filename(descriptive) or default_label
+
+        if destination == "series":
+            label_for_stem = descriptive or sanitize_filename(series_label_source) or "Special"
+            series_stem_label = label_for_stem
+            canonical_stem = build_series_stem(
+                series,
+                series_season_number if series_season_number is not None else series_season,
+                label_for_stem,
+                episode_number=series_episode_number,
+            )
 
         if extra:
             extra_suffix = sanitize_filename(extra_name) or extra_type
@@ -2923,6 +2969,31 @@ def process_download_job(
             except OSError:
                 pass
             raise JobCancelled()
+
+        if (
+            destination == "series"
+            and series_season_number is not None
+            and series_season_number <= 0
+            and series_episode_number is not None
+        ):
+            nfo_path = os.path.splitext(canonical_path)[0] + ".nfo"
+            title_value = series_stem_label or os.path.splitext(canonical_filename)[0]
+            plot_value = original_title_for_nfo or title_value
+            episode_value = max(int(series_episode_number), 1)
+            nfo_body = (
+                "<episodedetails>\n"
+                f"  <title>{html.escape(title_value)}</title>\n"
+                "  <season>0</season>\n"
+                f"  <episode>{episode_value}</episode>\n"
+                f"  <plot>{html.escape(plot_value)}</plot>\n"
+                "</episodedetails>\n"
+            )
+            try:
+                with open(nfo_path, "w", encoding="utf-8") as nfo_file:
+                    nfo_file.write(nfo_body)
+                log(f"Wrote companion NFO '{os.path.basename(nfo_path)}'.")
+            except OSError as exc:
+                warn(f"Failed to write NFO file '{nfo_path}': {exc}")
 
         for leftover in downloaded_candidates:
             if os.path.abspath(leftover) == os.path.abspath(target_path):
