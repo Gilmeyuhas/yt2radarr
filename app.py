@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from collections.abc import Iterable
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+from xml.sax.saxutils import escape
 
 from glob import glob as glob_paths
 
@@ -2992,6 +2993,41 @@ def process_download_job(
             except OSError:
                 pass
             raise JobCancelled()
+
+        recap_nfo_required = (
+            destination == "series"
+            and series_video_type == "recap"
+            and series_season_number is not None
+            and series_season_number > 0
+        )
+
+        if recap_nfo_required:
+            nfo_base, _ = os.path.splitext(canonical_path)
+            nfo_path = f"{nfo_base}.nfo"
+
+            recap_title = series_stem_label or descriptive or "Recap"
+            recap_title = (recap_title or "Recap").strip() or "Recap"
+
+            plot_value = youtube_title_for_metadata.strip() if youtube_title_for_metadata else ""
+            if not plot_value:
+                plot_value = recap_title
+
+            nfo_content = (
+                "<episodedetails>\n"
+                f"  <title>{escape(recap_title)}</title>\n"
+                f"  <season>{series_season_number}</season>\n"
+                "  <episode>0</episode>\n"
+                f"  <plot>{escape(plot_value)}</plot>\n"
+                "</episodedetails>\n"
+            )
+
+            try:
+                with open(nfo_path, "w", encoding="utf-8") as nfo_file:
+                    nfo_file.write(nfo_content)
+                log(f"Wrote recap NFO metadata to '{nfo_path}'.")
+            except OSError as exc:
+                fail(f"Failed to write recap NFO file '{nfo_path}': {exc}")
+                return
 
         for leftover in downloaded_candidates:
             if os.path.abspath(leftover) == os.path.abspath(target_path):
