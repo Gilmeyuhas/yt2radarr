@@ -2130,22 +2130,33 @@ def process_download_job(
             ensure_not_cancelled()
 
             normalized_season = int(series_season)
-            season_folder = "Season 0" if normalized_season <= 0 else f"Season {normalized_season}"
-            target_dir = os.path.join(series_path, season_folder)
-            os.makedirs(target_dir, exist_ok=True)
-            log(f"Storing video under '{season_folder}'.")
-
             label_source = series_video_label or series_video_type.capitalize()
-            episode_number = _select_series_episode_number(target_dir, normalized_season)
-            log(
-                "Selected episode token "
-                f"E{episode_number:02d} for season {normalized_season}."
-            )
-            series = series or {}
-            series_episode_number = episode_number
-            series_season_number = normalized_season
-            series_label_source = label_source
-            download_dir = target_dir
+
+            if normalized_season <= 0:
+                season_folder = ".extras"
+                target_dir = os.path.join(series_path, season_folder)
+                os.makedirs(target_dir, exist_ok=True)
+                log("Storing special under '.extras'.")
+                series_episode_number = None
+                series_season_number = 0
+                series_label_source = label_source
+                download_dir = target_dir
+            else:
+                season_folder = f"Season {normalized_season}"
+                target_dir = os.path.join(series_path, season_folder)
+                os.makedirs(target_dir, exist_ok=True)
+                log(f"Storing video under '{season_folder}'.")
+
+                episode_number = _select_series_episode_number(target_dir, normalized_season)
+                log(
+                    "Selected episode token "
+                    f"E{episode_number:02d} for season {normalized_season}."
+                )
+                series = series or {}
+                series_episode_number = episode_number
+                series_season_number = normalized_season
+                series_label_source = label_source
+                download_dir = target_dir
         else:
             resolved = resolve_movie_by_metadata(movie_id, tmdb, title, year, log)
             if resolved is None or not str(resolved.get("id")):
@@ -2486,26 +2497,29 @@ def process_download_job(
         descriptive = sanitize_filename(descriptive) or default_label
 
         if destination == "series":
-            if (
-                series_episode_number is None
-                and series_season_number is not None
-                and series_season_number <= 0
-            ):
-                series_episode_number = _select_series_episode_number(
-                    target_dir, series_season_number
+            if series_season_number is not None and series_season_number > 0:
+                if series_episode_number is None:
+                    series_episode_number = _select_series_episode_number(
+                        target_dir, series_season_number
+                    )
+                    log(
+                        "Resolved missing episode token "
+                        f"E{series_episode_number:02d} for season {series_season_number}."
+                    )
+                label_for_stem = (
+                    descriptive or sanitize_filename(series_label_source) or "Special"
                 )
-                log(
-                    "Resolved missing episode token "
-                    f"E{series_episode_number:02d} for season {series_season_number}."
+                series_stem_label = label_for_stem
+                canonical_stem = build_series_stem(
+                    series,
+                    series_season_number
+                    if series_season_number is not None
+                    else series_season,
+                    label_for_stem,
+                    episode_number=series_episode_number,
                 )
-            label_for_stem = descriptive or sanitize_filename(series_label_source) or "Special"
-            series_stem_label = label_for_stem
-            canonical_stem = build_series_stem(
-                series,
-                series_season_number if series_season_number is not None else series_season,
-                label_for_stem,
-                episode_number=series_episode_number,
-            )
+            else:
+                canonical_stem = descriptive or sanitize_filename(series_label_source) or "Special"
 
         if extra:
             extra_suffix = sanitize_filename(extra_name) or extra_type
