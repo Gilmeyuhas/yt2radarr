@@ -2495,6 +2495,18 @@ def process_download_job(
         descriptive = sanitize_filename(descriptive) or default_label
 
         if destination == "series":
+            if (
+                series_episode_number is None
+                and series_season_number is not None
+                and series_season_number <= 0
+            ):
+                series_episode_number = _select_series_episode_number(
+                    target_dir, series_season_number
+                )
+                log(
+                    "Resolved missing episode token "
+                    f"E{series_episode_number:02d} for season {series_season_number}."
+                )
             label_for_stem = descriptive or sanitize_filename(series_label_source) or "Special"
             series_stem_label = label_for_stem
             canonical_stem = build_series_stem(
@@ -2970,16 +2982,29 @@ def process_download_job(
                 pass
             raise JobCancelled()
 
+        episode_number_for_nfo: Optional[int] = series_episode_number
+        if episode_number_for_nfo is None and destination == "series":
+            match = re.search(
+                r"S00E(\d{2})",
+                os.path.basename(canonical_path),
+                re.IGNORECASE,
+            )
+            if match:
+                try:
+                    episode_number_for_nfo = int(match.group(1))
+                except (TypeError, ValueError):
+                    episode_number_for_nfo = None
+
         if (
             destination == "series"
             and series_season_number is not None
             and series_season_number <= 0
-            and series_episode_number is not None
+            and episode_number_for_nfo is not None
         ):
             nfo_path = os.path.splitext(canonical_path)[0] + ".nfo"
             title_value = series_stem_label or os.path.splitext(canonical_filename)[0]
             plot_value = original_title_for_nfo or title_value
-            episode_value = max(int(series_episode_number), 1)
+            episode_value = max(int(episode_number_for_nfo), 1)
             nfo_body = (
                 "<episodedetails>\n"
                 f"  <title>{html.escape(title_value)}</title>\n"
