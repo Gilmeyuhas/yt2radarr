@@ -630,23 +630,90 @@ def _matching_subtitle_languages(
     return matches
 
 
+def _parse_list_subs_output(output: str) -> Tuple[List[str], List[str]]:
+    """Parse `yt-dlp --list-subs` output into official and automatic language lists."""
+
+    official: List[str] = []
+    automatic: List[str] = []
+    section: Optional[str] = None
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        if "available subtitles for" in lowered:
+            section = "official"
+            continue
+        if "available automatic captions for" in lowered:
+            section = "auto"
+            continue
+        if section is None:
+            continue
+        if lowered.startswith("language") or lowered.startswith("name"):
+            continue
+        if line.startswith("["):
+            continue
+
+        language = line.split()[0].strip()
+        if not language:
+            continue
+        bucket = official if section == "official" else automatic
+        if language not in bucket:
+            bucket.append(language)
+
+    return official, automatic
+
+
+def _probe_subtitle_tracks(
+    yt_url: str,
+    cookie_path: str,
+    debug_enabled: bool,
+    warn: Callable[[str], None],
+    debug: Callable[[str], None],
+) -> Tuple[List[str], List[str]]:
+    """Run a subtitle preflight probe with `yt-dlp --list-subs`."""
+
+    command = ["yt-dlp", "--ignore-config"]
+    if cookie_path:
+        command += ["--cookies", cookie_path]
+    command += ["--skip-download", "--list-subs", "--no-playlist", yt_url]
+
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            text=True,
+        )
+    except (OSError, ValueError) as exc:
+        warn(f"Subtitle preflight probe failed to start: {exc}")
+        return [], []
+
+    output = completed.stdout or ""
+    if debug_enabled and output.strip():
+        for line in output.splitlines():
+            debug(f"yt-dlp subtitle preflight: {line}")
+
+    if completed.returncode != 0:
+        warn(
+            "Subtitle preflight probe did not complete successfully; falling back to "
+            "metadata-based subtitle detection."
+        )
+
+    return _parse_list_subs_output(output)
+
+
 def _select_subtitle_download_mode(
-    info_payload: Optional[Dict[str, Any]], preferred_langs: str
+    official_languages: Iterable[str],
+    automatic_languages: Iterable[str],
+    preferred_langs: str,
 ) -> Tuple[str, List[str], List[str]]:
-    """Pick subtitle download mode from yt-dlp metadata preflight information."""
+    """Pick subtitle download mode from preflight subtitle language lists."""
 
-    if not isinstance(info_payload, dict):
-        return "none", [], []
-
-    subtitles = info_payload.get("subtitles")
-    automatic_captions = info_payload.get("automatic_captions")
-
-    subtitle_languages = list(subtitles.keys()) if isinstance(subtitles, dict) else []
-    automatic_languages = (
-        list(automatic_captions.keys()) if isinstance(automatic_captions, dict) else []
-    )
-
-    official_matches = _matching_subtitle_languages(subtitle_languages, preferred_langs)
+    official_matches = _matching_subtitle_languages(official_languages, preferred_langs)
     auto_matches = _matching_subtitle_languages(automatic_languages, preferred_langs)
 
     if official_matches:
@@ -2153,6 +2220,8 @@ def process_download_job(
         subtitle_mode = "none"
         subtitle_official_matches: List[str] = []
         subtitle_auto_matches: List[str] = []
+        subtitle_official_languages: List[str] = []
+        subtitle_automatic_languages: List[str] = []
 
         if shutil.which("ffmpeg") is None:
             warn(
@@ -2380,11 +2449,33 @@ def process_download_job(
             log("yt-dlp did not report a resolved format; proceeding with download.")
 
         if subtitles_enabled:
+            subtitle_official_languages, subtitle_automatic_languages = _probe_subtitle_tracks(
+                yt_url=yt_url,
+                cookie_path=cookie_path,
+                debug_enabled=debug_enabled,
+                warn=warn,
+                debug=debug,
+            )
+            if not subtitle_official_languages and not subtitle_automatic_languages:
+                subtitle_official_languages = list(
+                    (info_payload.get("subtitles") or {}).keys()
+                    if isinstance(info_payload, dict) and isinstance(info_payload.get("subtitles"), dict)
+                    else []
+                )
+                subtitle_automatic_languages = list(
+                    (info_payload.get("automatic_captions") or {}).keys()
+                    if isinstance(info_payload, dict) and isinstance(info_payload.get("automatic_captions"), dict)
+                    else []
+                )
             (
                 subtitle_mode,
                 subtitle_official_matches,
                 subtitle_auto_matches,
-            ) = _select_subtitle_download_mode(info_payload, subtitles_langs)
+            ) = _select_subtitle_download_mode(
+                subtitle_official_languages,
+                subtitle_automatic_languages,
+                subtitles_langs,
+            )
             if subtitle_mode == "official":
                 log(
                     "Subtitle preflight selected official subtitles for languages: "
