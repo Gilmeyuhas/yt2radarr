@@ -2,6 +2,7 @@
 
 # pylint: disable=too-many-lines
 
+import glob
 import itertools
 import json
 import os
@@ -78,6 +79,13 @@ YTDLP_FORMAT_SELECTOR = (
 )
 METADATA_FETCH_TIMEOUT_SECONDS = 120
 
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"
+}
+
+SUBTITLE_EXTENSIONS = {
+    ".srt", ".vtt", ".ass", ".ssa", ".ttml"
+}
 
 
 YOUTUBE_SEARCH_MAX_RESULTS = 20
@@ -122,6 +130,10 @@ def _default_config() -> Dict:
         "path_overrides": [],
         "debug_mode": bool(os.environ.get("YT2RADARR_DEBUG", "").strip()),
         "cookie_file": "",
+        "subtitles": {
+            "enabled_default": False,
+            "langs_default": "en",
+        },
     }
 
 
@@ -511,6 +523,142 @@ def normalize_path_overrides(overrides: List[Dict[str, str]]) -> List[Dict[str, 
     return normalized
 
 
+def _is_video_output(path: str) -> bool:
+    """Return True when the file extension matches a video container."""
+
+    return os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS
+
+
+def _find_subtitle_candidates(
+    download_dir: str, stem: str, exts: Tuple[str, ...] = (".srt",)
+) -> List[str]:
+    """Return subtitle sidecar candidates for the given stem and extensions."""
+
+    matches: List[str] = []
+    for candidate in glob.glob(os.path.join(download_dir, f"{stem}*")):
+        if not os.path.isfile(candidate):
+            continue
+        ext = os.path.splitext(candidate)[1].lower()
+        if ext in exts:
+            matches.append(candidate)
+    return sorted(matches)
+
+
+def _pick_best_subtitle_candidate(
+    candidates: List[str], preferred_langs: str
+) -> Optional[str]:
+    """Choose the subtitle sidecar that best matches the preferred languages."""
+
+    if not candidates:
+        return None
+
+    preferred = [lang.strip().lower() for lang in preferred_langs.split(",") if lang.strip()]
+    if preferred:
+        for lang in preferred:
+            for candidate in candidates:
+                name = os.path.basename(candidate).lower()
+                if f'.{lang}.' in name or name.endswith(f'.{lang}.srt'):
+                    return candidate
+
+    return max(candidates, key=os.path.getmtime)
+
+
+def _finalise_single_srt_sidecar(
+    download_dir: str,
+    download_filename_base: str,
+    canonical_video_path: str,
+    preferred_langs: str,
+    log: Callable[[str], None],
+    warn: Callable[[str], None],
+) -> None:
+    """Rename the chosen SRT sidecar to match the canonical video filename."""
+
+    srt_candidates = _find_subtitle_candidates(
+        download_dir, download_filename_base, exts=(".srt",)
+    )
+    if not srt_candidates:
+        return
+
+    chosen = _pick_best_subtitle_candidate(srt_candidates, preferred_langs)
+    if not chosen:
+        return
+
+    desired_srt_path = os.path.splitext(canonical_video_path)[0] + ".srt"
+
+    if os.path.exists(desired_srt_path):
+        os.remove(desired_srt_path)
+
+    os.replace(chosen, desired_srt_path)
+    log(f"Subtitle sidecar saved as: {desired_srt_path}")
+
+    extra_candidates = _find_subtitle_candidates(
+        download_dir,
+        download_filename_base,
+        exts=(".srt", ".vtt", ".ass", ".ssa", ".ttml"),
+    )
+    for extra in extra_candidates:
+        if os.path.abspath(extra) != os.path.abspath(desired_srt_path) and os.path.exists(extra):
+            try:
+                os.remove(extra)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                warn(f"Failed to remove extra subtitle file {extra}: {exc}")
+
+
+def _download_auto_subtitles(
+    yt_url: str,
+    cookie_path: str,
+    target_template: str,
+    subtitles_langs: str,
+    cancel_event: threading.Event,
+    handle_output_line: Callable[[str], None],
+    warn: Callable[[str], None],
+    debug: Callable[[str], None],
+) -> None:
+    """Fetch auto-generated subtitles when official subtitles were unavailable."""
+
+    command = ["yt-dlp"]
+
+    if cookie_path:
+        command += ["--cookies", cookie_path]
+
+    command += ["--skip-download"]
+    command += ["--write-auto-subs"]
+    command += ["--convert-subs", "srt"]
+
+    if subtitles_langs:
+        command += ["--sub-langs", subtitles_langs]
+
+    command += ["-o", target_template, yt_url]
+
+    debug(f"Auto-sub fallback command: {' '.join(command)}")
+
+    try:
+        with subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            stdin=subprocess.DEVNULL,
+        ) as process:
+            assert process.stdout is not None
+            for raw_line in process.stdout:
+                if cancel_event.is_set():
+                    try:
+                        process.terminate()
+                    except OSError:
+                        pass
+                    break
+                handle_output_line(raw_line.rstrip())
+            rc = process.wait()
+    except (OSError, ValueError) as exc:
+        warn(f"Auto-generated subtitle fallback failed to start: {exc}")
+        return
+
+    if rc != 0:
+        warn("Auto-generated subtitle fallback did not produce subtitles.")
+
+
 def _normalize_loaded_config(raw_config: Optional[Dict]) -> Dict:
     """Merge a raw configuration dictionary with defaults and sanitize values."""
 
@@ -541,6 +689,20 @@ def _normalize_loaded_config(raw_config: Optional[Dict]) -> Dict:
         if os.path.exists(default_candidate):
             cookie_file = DEFAULT_COOKIE_FILENAME
     merged["cookie_file"] = cookie_file
+
+    subs_cfg = merged.get("subtitles")
+    if not isinstance(subs_cfg, dict):
+        subs_cfg = {}
+
+    enabled_default = bool(subs_cfg.get("enabled_default", False))
+    langs_default = str(subs_cfg.get("langs_default") or "").strip()
+    if not langs_default:
+        langs_default = "en"
+
+    merged["subtitles"] = {
+        "enabled_default": enabled_default,
+        "langs_default": langs_default,
+    }
 
     return merged
 
@@ -1132,6 +1294,8 @@ def _prepare_create_payload(data: Dict, error: Callable[[str], None]) -> Dict:
         "merge_playlist": playlist_mode == "merge",
         "playlist_mode": playlist_mode,
         "standalone": standalone,
+        "download_subtitles": bool(data.get("download_subtitles")),
+        "subtitles_langs": str(data.get("subtitles_langs") or "").strip(),
     }
 
 
@@ -1596,6 +1760,7 @@ def index():
         movies=movies,
         configured=is_configured(config),
         debug_mode=config.get("debug_mode", False),
+        subtitles_defaults=config.get("subtitles", {}),
     )
 
 
@@ -1720,6 +1885,22 @@ def process_download_job(
 
         standalone = bool(payload.get("standalone"))
         payload["standalone"] = standalone
+
+        subs_defaults = (
+            config.get("subtitles") if isinstance(config.get("subtitles"), dict) else {}
+        )
+        subtitles_enabled = bool(payload.get("download_subtitles"))
+        subtitles_langs = str(payload.get("subtitles_langs") or "").strip()
+        if not subtitles_langs:
+            subtitles_langs = str(subs_defaults.get("langs_default") or "en").strip()
+        if merge_playlist and subtitles_enabled:
+            warn(
+                "Subtitles are not supported when merging playlists into a single file. "
+                "Disabling subtitles for this job."
+            )
+            subtitles_enabled = False
+        payload["download_subtitles"] = subtitles_enabled
+        payload["subtitles_langs"] = subtitles_langs
 
         standalone_name_mode = (
             payload.get("standalone_name_mode") or "youtube"
@@ -2243,6 +2424,11 @@ def process_download_job(
             command.append("--yes-playlist")
         else:
             command.append("--no-playlist")
+        if subtitles_enabled:
+            command += ["--write-subs"]
+            command += ["--convert-subs", "srt"]
+            if subtitles_langs:
+                command += ["--sub-langs", subtitles_langs]
         command += ["-o", target_template, yt_url]
 
         log("Running yt-dlp with explicit output template.")
@@ -2356,6 +2542,28 @@ def process_download_job(
             for path in glob_paths(expected_pattern)
             if os.path.isfile(path) and not path.endswith((".part", ".ytdl"))
         ]
+
+        if subtitles_enabled:
+            srt_candidates = _find_subtitle_candidates(
+                download_dir, download_filename_base, exts=(".srt",)
+            )
+            if not srt_candidates:
+                warn("No official subtitles found. Trying auto-generated subtitles.")
+                _download_auto_subtitles(
+                    yt_url=yt_url,
+                    cookie_path=cookie_path,
+                    target_template=target_template,
+                    subtitles_langs=subtitles_langs,
+                    cancel_event=cancel_event,
+                    handle_output_line=handle_output_line,
+                    warn=warn,
+                    debug=debug,
+                )
+                downloaded_candidates = [
+                    path
+                    for path in glob_paths(expected_pattern)
+                    if os.path.isfile(path) and not path.endswith((".part", ".ytdl"))
+                ]
 
         if cancel_event.is_set():
             acknowledge_cancellation()
@@ -2494,14 +2702,15 @@ def process_download_job(
 
 
         final_candidates = [
-            path for path in downloaded_candidates if not _is_intermediate_file(path)
+            path
+            for path in downloaded_candidates
+            if not _is_intermediate_file(path) and _is_video_output(path)
         ]
 
-        if final_candidates:
-            target_path = max(final_candidates, key=os.path.getmtime)
-        else:
-            downloaded_candidates.sort(key=os.path.getmtime, reverse=True)
-            target_path = downloaded_candidates[0]
+        if not final_candidates:
+            raise RuntimeError("No final video file found after download.")
+
+        target_path = max(final_candidates, key=os.path.getmtime)
         actual_extension = os.path.splitext(target_path)[1].lstrip(".").lower()
 
         job_snapshot = jobs_repo.get(job_id)
@@ -2579,6 +2788,16 @@ def process_download_job(
                 f"Failed to rename downloaded file to '{canonical_filename}': {exc}"
             )
             return
+
+        if subtitles_enabled:
+            _finalise_single_srt_sidecar(
+                download_dir=download_dir,
+                download_filename_base=download_filename_base,
+                canonical_video_path=target_path,
+                preferred_langs=subtitles_langs,
+                log=log,
+                warn=warn,
+            )
 
         if cancel_event.is_set():
             acknowledge_cancellation()
@@ -2835,6 +3054,10 @@ def setup():
         overrides = normalize_path_overrides(override_entries)
         errors.extend(override_errors)
         debug_mode = bool(request.form.get("debug_mode"))
+        subtitles_enabled_default = bool(request.form.get("subtitles_enabled_default"))
+        subtitles_langs_default = str(
+            request.form.get("subtitles_langs_default") or ""
+        ).strip()
 
         cookie_text = request.form.get("cookie_text") or ""
         cookie_preview = cookie_text
@@ -2856,6 +3079,10 @@ def setup():
                 "file_paths": file_paths,
                 "path_overrides": overrides,
                 "debug_mode": debug_mode,
+                "subtitles": {
+                    "enabled_default": subtitles_enabled_default,
+                    "langs_default": subtitles_langs_default or "en",
+                },
             }
         )
 

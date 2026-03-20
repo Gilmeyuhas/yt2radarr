@@ -14,6 +14,10 @@ document.addEventListener('DOMContentLoaded', () => {
     standaloneCustomToggle: document.getElementById('standaloneCustomNameToggle'),
     standaloneCustomGroup: document.getElementById('standaloneCustomNameGroup'),
     standaloneCustomInput: document.getElementById('standaloneCustomName'),
+    downloadSubtitlesCheckbox: document.getElementById('downloadSubtitles'),
+    subtitleOptions: document.getElementById('subtitleOptions'),
+    subtitleLangsInput: document.getElementById('subtitleLangs'),
+    subtitleMergeWarning: document.getElementById('subtitleMergeWarning'),
     playlistModeSelect: document.getElementById('playlistMode'),
     extraTypeSelect: document.getElementById('extraType'),
     extraFields: document.getElementById('extraFields'),
@@ -487,6 +491,40 @@ document.addEventListener('DOMContentLoaded', () => {
       elements.standaloneCustomToggle.checked = false;
     }
     updateStandaloneCustomNameState();
+  }
+
+
+  function updateSubtitleUi() {
+    if (!elements.downloadSubtitlesCheckbox || !elements.subtitleOptions) {
+      return;
+    }
+    elements.subtitleOptions.style.display = elements.downloadSubtitlesCheckbox.checked ? 'block' : 'none';
+  }
+
+  function updateSubtitleAvailabilityForPlaylistMode() {
+    const playlistMode = elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single';
+    const mergeMode = playlistMode === 'merge';
+
+    if (!elements.downloadSubtitlesCheckbox) {
+      return;
+    }
+
+    if (mergeMode) {
+      elements.downloadSubtitlesCheckbox.checked = false;
+      elements.downloadSubtitlesCheckbox.disabled = true;
+      if (elements.subtitleOptions) {
+        elements.subtitleOptions.style.display = 'none';
+      }
+      if (elements.subtitleMergeWarning) {
+        elements.subtitleMergeWarning.style.display = 'block';
+      }
+    } else {
+      elements.downloadSubtitlesCheckbox.disabled = false;
+      if (elements.subtitleMergeWarning) {
+        elements.subtitleMergeWarning.style.display = 'none';
+      }
+      updateSubtitleUi();
+    }
   }
 
   function updateStandaloneState() {
@@ -1915,6 +1953,17 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.standaloneCustomToggle.addEventListener('change', updateStandaloneCustomNameState);
   }
 
+  if (elements.downloadSubtitlesCheckbox) {
+    elements.downloadSubtitlesCheckbox.addEventListener('change', updateSubtitleUi);
+  }
+
+  if (elements.playlistModeSelect) {
+    elements.playlistModeSelect.addEventListener('change', updateSubtitleAvailabilityForPlaylistMode);
+  }
+
+  updateSubtitleUi();
+  updateSubtitleAvailabilityForPlaylistMode();
+
   initialiseMovieNotFoundPrompt();
   syncMovieSelection();
 
@@ -2172,6 +2221,12 @@ document.addEventListener('DOMContentLoaded', () => {
       extra_name: elements.extraNameInput ? elements.extraNameInput.value.trim() : '',
       playlist_mode: elements.playlistModeSelect ? elements.playlistModeSelect.value : 'single',
       standalone: standaloneEnabled,
+      download_subtitles: elements.downloadSubtitlesCheckbox
+        ? elements.downloadSubtitlesCheckbox.checked
+        : false,
+      subtitles_langs: elements.subtitleLangsInput
+        ? elements.subtitleLangsInput.value.trim()
+        : '',
       standalone_name_mode: standaloneEnabled
         ? standaloneCustomEnabled
           ? 'custom'

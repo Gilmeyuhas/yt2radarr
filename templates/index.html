@@ -177,6 +177,38 @@
             <summary>Advanced Options</summary>
             <div class="advanced-content">
               <div class="advanced-group">
+                <h3>Subtitles</h3>
+
+                <div class="form-check">
+                  <input
+                    type="checkbox"
+                    id="downloadSubtitles"
+                    {% if subtitles_defaults.get('enabled_default') %}checked{% endif %}
+                  />
+                  <label for="downloadSubtitles">Download subtitles</label>
+                </div>
+
+                <div id="subtitleOptions" style="display: none; margin-top: 10px;">
+                  <div class="form-group">
+                    <label for="subtitleLangs">Languages</label>
+                    <input
+                      type="text"
+                      id="subtitleLangs"
+                      value="{{ subtitles_defaults.get('langs_default', 'en') }}"
+                      placeholder="e.g. en, he, en.*, he.*"
+                    />
+                    <small>
+                      Official subtitles are tried first. If none exist, auto-generated subtitles will be downloaded instead.
+                    </small>
+                  </div>
+                </div>
+
+                <div id="subtitleMergeWarning" style="display: none; color: #cc8800; margin-top: 8px;">
+                  Subtitles are not supported when merging a playlist into one file.
+                </div>
+              </div>
+
+              <div class="advanced-group">
                 <h3>Movie Metadata Overrides</h3>
                 <p class="help-text">
                   These values default to the selected Radarr movie. Override them here only if you
