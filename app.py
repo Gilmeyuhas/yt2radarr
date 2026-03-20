@@ -648,7 +648,7 @@ def _download_auto_subtitles(
     warn: Callable[[str], None],
     debug: Callable[[str], None],
 ) -> None:
-    """Fetch auto-generated subtitles when official subtitles were unavailable."""
+    """Fetch translated or auto-generated subtitles when official subtitles were unavailable."""
 
     command = ["yt-dlp"]
 
@@ -656,6 +656,7 @@ def _download_auto_subtitles(
         command += ["--cookies", cookie_path]
 
     command += ["--skip-download"]
+    command += ["--write-subs"]
     command += ["--write-auto-subs"]
     command += ["--convert-subs", "srt"]
 
@@ -2586,7 +2587,7 @@ def process_download_job(
                 download_dir, download_filename_base, exts=(".srt",)
             )
             if not srt_candidates:
-                warn("No official subtitles found. Trying auto-generated subtitles.")
+                warn("No official subtitles found. Trying translated or auto-generated subtitles.")
                 _download_auto_subtitles(
                     yt_url=yt_url,
                     cookie_path=cookie_path,
