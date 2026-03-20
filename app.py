@@ -597,6 +597,65 @@ def _pick_best_subtitle_candidate(
     return max(candidates, key=os.path.getmtime)
 
 
+def _subtitle_language_matches_track(available_language: str, requested_language: str) -> bool:
+    """Return True when an available track language matches the requested language."""
+
+    available = available_language.strip().lower()
+    requested = requested_language.strip().lower()
+    if not available or not requested:
+        return False
+    if requested.endswith(".*"):
+        prefix = requested[:-2]
+        return available == prefix or available.startswith(f"{prefix}-") or available.startswith(f"{prefix}_")
+    return available == requested or available.startswith(f"{requested}-") or available.startswith(f"{requested}_")
+
+
+def _matching_subtitle_languages(
+    available_languages: Iterable[str], preferred_langs: str
+) -> List[str]:
+    """Return available subtitle languages that satisfy the requested preferences."""
+
+    available = [str(language).strip() for language in available_languages if str(language).strip()]
+    preferred = _subtitle_language_preferences(preferred_langs)
+    if not preferred:
+        return available
+
+    matches: List[str] = []
+    for requested in preferred:
+        for language in available:
+            if language in matches:
+                continue
+            if _subtitle_language_matches_track(language, requested):
+                matches.append(language)
+    return matches
+
+
+def _select_subtitle_download_mode(
+    info_payload: Optional[Dict[str, Any]], preferred_langs: str
+) -> Tuple[str, List[str], List[str]]:
+    """Pick subtitle download mode from yt-dlp metadata preflight information."""
+
+    if not isinstance(info_payload, dict):
+        return "none", [], []
+
+    subtitles = info_payload.get("subtitles")
+    automatic_captions = info_payload.get("automatic_captions")
+
+    subtitle_languages = list(subtitles.keys()) if isinstance(subtitles, dict) else []
+    automatic_languages = (
+        list(automatic_captions.keys()) if isinstance(automatic_captions, dict) else []
+    )
+
+    official_matches = _matching_subtitle_languages(subtitle_languages, preferred_langs)
+    auto_matches = _matching_subtitle_languages(automatic_languages, preferred_langs)
+
+    if official_matches:
+        return "official", official_matches, auto_matches
+    if auto_matches:
+        return "auto", official_matches, auto_matches
+    return "none", official_matches, auto_matches
+
+
 def _finalise_single_srt_sidecar(
     download_dir: str,
     download_filename_base: str,
@@ -2091,6 +2150,9 @@ def process_download_job(
             log(f"Using custom descriptive name '{descriptive}'.")
 
         info_payload: Optional[Dict] = None
+        subtitle_mode = "none"
+        subtitle_official_matches: List[str] = []
+        subtitle_auto_matches: List[str] = []
 
         if shutil.which("ffmpeg") is None:
             warn(
@@ -2317,6 +2379,31 @@ def process_download_job(
         else:
             log("yt-dlp did not report a resolved format; proceeding with download.")
 
+        if subtitles_enabled:
+            (
+                subtitle_mode,
+                subtitle_official_matches,
+                subtitle_auto_matches,
+            ) = _select_subtitle_download_mode(info_payload, subtitles_langs)
+            if subtitle_mode == "official":
+                log(
+                    "Subtitle preflight selected official subtitles for languages: "
+                    + ", ".join(subtitle_official_matches)
+                )
+            elif subtitle_mode == "auto":
+                warn(
+                    "Subtitle preflight found no official subtitles for the requested "
+                    "languages. Using auto-generated subtitles instead. "
+                    f"Available auto subtitle languages: {', '.join(subtitle_auto_matches)}"
+                )
+            else:
+                warn(
+                    "Subtitle preflight found no subtitles for the requested languages. "
+                    "Skipping subtitle download for this job."
+                )
+                subtitles_enabled = False
+            payload["download_subtitles"] = subtitles_enabled
+
         if not descriptive:
             candidate_title = ""
             if info_payload:
@@ -2465,7 +2552,10 @@ def process_download_job(
         else:
             command.append("--no-playlist")
         if subtitles_enabled:
-            command += ["--write-subs"]
+            if subtitle_mode == "official":
+                command += ["--write-subs"]
+            elif subtitle_mode == "auto":
+                command += ["--write-auto-subs"]
             command += ["--convert-subs", "srt"]
             if requested_subtitles_langs:
                 command += ["--sub-langs", requested_subtitles_langs]
@@ -2594,8 +2684,15 @@ def process_download_job(
             srt_candidates = _find_subtitle_candidates(
                 download_dir, download_filename_base, exts=(".srt",)
             )
-            if not srt_candidates:
-                warn("No official subtitles found. Trying translated or auto-generated subtitles.")
+            if (
+                not srt_candidates
+                and subtitle_mode == "official"
+                and subtitle_auto_matches
+            ):
+                warn(
+                    "Official subtitle download produced no SRT file even though metadata "
+                    "reported auto subtitles were available. Trying auto-generated subtitles."
+                )
                 _download_auto_subtitles(
                     yt_url=yt_url,
                     cookie_path=cookie_path,
