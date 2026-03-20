@@ -544,6 +544,41 @@ def _find_subtitle_candidates(
     return sorted(matches)
 
 
+def _subtitle_language_preferences(raw_langs: str) -> List[str]:
+    """Expand user-provided subtitle languages into exact and prefix wildcard matches."""
+
+    preferences: List[str] = []
+    for raw_lang in raw_langs.split(","):
+        lang = raw_lang.strip().lower()
+        if not lang or lang in preferences:
+            continue
+        preferences.append(lang)
+        if "*" not in lang:
+            wildcard = f"{lang}.*"
+            if wildcard not in preferences:
+                preferences.append(wildcard)
+    return preferences
+
+
+def _subtitle_candidate_matches_language(path: str, language: str) -> bool:
+    """Return True when a subtitle filename appears to match the requested language."""
+
+    name = os.path.basename(path).lower()
+    if language.endswith(".*"):
+        prefix = re.escape(language[:-2])
+        return (
+            re.search(rf"\.{prefix}(?:[-_][^.]+)?\.[^.]+$", name) is not None
+            or f".{language[:-2]}." in name
+        )
+
+    return (
+        f".{language}." in name
+        or f".{language}-" in name
+        or f".{language}_" in name
+        or name.endswith(f".{language}.srt")
+    )
+
+
 def _pick_best_subtitle_candidate(
     candidates: List[str], preferred_langs: str
 ) -> Optional[str]:
@@ -552,12 +587,11 @@ def _pick_best_subtitle_candidate(
     if not candidates:
         return None
 
-    preferred = [lang.strip().lower() for lang in preferred_langs.split(",") if lang.strip()]
+    preferred = _subtitle_language_preferences(preferred_langs)
     if preferred:
         for lang in preferred:
             for candidate in candidates:
-                name = os.path.basename(candidate).lower()
-                if f'.{lang}.' in name or name.endswith(f'.{lang}.srt'):
+                if _subtitle_candidate_matches_language(candidate, lang):
                     return candidate
 
     return max(candidates, key=os.path.getmtime)
@@ -625,8 +659,9 @@ def _download_auto_subtitles(
     command += ["--write-auto-subs"]
     command += ["--convert-subs", "srt"]
 
-    if subtitles_langs:
-        command += ["--sub-langs", subtitles_langs]
+    requested_langs = ",".join(_subtitle_language_preferences(subtitles_langs))
+    if requested_langs:
+        command += ["--sub-langs", requested_langs]
 
     command += ["-o", target_template, yt_url]
 
@@ -1893,6 +1928,9 @@ def process_download_job(
         subtitles_langs = str(payload.get("subtitles_langs") or "").strip()
         if not subtitles_langs:
             subtitles_langs = str(subs_defaults.get("langs_default") or "en").strip()
+        requested_subtitles_langs = ",".join(
+            _subtitle_language_preferences(subtitles_langs)
+        )
         if merge_playlist and subtitles_enabled:
             warn(
                 "Subtitles are not supported when merging playlists into a single file. "
@@ -2427,8 +2465,8 @@ def process_download_job(
         if subtitles_enabled:
             command += ["--write-subs"]
             command += ["--convert-subs", "srt"]
-            if subtitles_langs:
-                command += ["--sub-langs", subtitles_langs]
+            if requested_subtitles_langs:
+                command += ["--sub-langs", requested_subtitles_langs]
         command += ["-o", target_template, yt_url]
 
         log("Running yt-dlp with explicit output template.")
@@ -2553,7 +2591,7 @@ def process_download_job(
                     yt_url=yt_url,
                     cookie_path=cookie_path,
                     target_template=target_template,
-                    subtitles_langs=subtitles_langs,
+                    subtitles_langs=requested_subtitles_langs,
                     cancel_event=cancel_event,
                     handle_output_line=handle_output_line,
                     warn=warn,
@@ -2755,7 +2793,10 @@ def process_download_job(
         else:
             canonical_filename = canonical_stem
         canonical_path = os.path.join(target_dir, canonical_filename)
-        if os.path.exists(canonical_path):
+        if (
+            os.path.exists(canonical_path)
+            and os.path.abspath(canonical_path) != os.path.abspath(target_path)
+        ):
             base_name, ext_part = os.path.splitext(canonical_filename)
             log(
                 (
