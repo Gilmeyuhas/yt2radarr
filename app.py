@@ -650,11 +650,12 @@ def _download_auto_subtitles(
 ) -> None:
     """Fetch translated or auto-generated subtitles when official subtitles were unavailable."""
 
-    command = ["yt-dlp"]
+    command = ["yt-dlp", "--ignore-config"]
 
     if cookie_path:
         command += ["--cookies", cookie_path]
 
+    command += ["--extractor-args", "youtube:player_client=web,web_safari,android_vr"]
     command += ["--skip-download"]
     command += ["--write-subs"]
     command += ["--write-auto-subs"]
@@ -2100,7 +2101,7 @@ def process_download_job(
         progress_pattern = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
         format_selector = YTDLP_FORMAT_SELECTOR
 
-        info_command = ["yt-dlp"]
+        info_command = ["yt-dlp", "--ignore-config"]
         if cookie_path:
             info_command += ["--cookies", cookie_path]
         info_command += ["--js-runtimes", "deno"]
@@ -2453,7 +2454,7 @@ def process_download_job(
             target_template = os.path.join(download_dir, f"{template_base}.%(ext)s")
             expected_pattern = os.path.join(download_dir, f"{download_filename_base}.*")
 
-        command = ["yt-dlp"]
+        command = ["yt-dlp", "--ignore-config"]
         if cookie_path:
             command += ["--cookies", cookie_path]
         command += ["--js-runtimes", "deno"]
