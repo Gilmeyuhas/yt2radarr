@@ -655,7 +655,7 @@ def _download_auto_subtitles(
     if cookie_path:
         command += ["--cookies", cookie_path]
 
-    command += ["--extractor-args", "youtube:player_client=web,web_safari,android_vr"]
+    command += ["--extractor-args", "youtube:player_client=tv,android_vr"]
     command += ["--skip-download"]
     command += ["--write-subs"]
     command += ["--write-auto-subs"]
@@ -2514,6 +2514,13 @@ def process_download_job(
             lowered = line.lower()
             if "error" in lowered:
                 append_job_log(job_id, f"ERROR: {line}")
+                return
+            if "po token" in lowered and "subtitles" in lowered:
+                warn(
+                    "YouTube requires a subtitles PO token for some client subtitle requests. "
+                    "Falling back to clients that avoid subtitle PO tokens when possible."
+                )
+                warn(line)
                 return
             if "warning" in lowered:
                 warn(line)
