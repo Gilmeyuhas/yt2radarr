@@ -87,6 +87,15 @@ SUBTITLE_EXTENSIONS = {
     ".srt", ".vtt", ".ass", ".ssa", ".ttml"
 }
 
+LANGUAGE_CODE_ALIASES = {
+    "he": {"iw"},
+    "iw": {"he"},
+    "id": {"in"},
+    "in": {"id"},
+    "yi": {"ji"},
+    "ji": {"yi"},
+}
+
 
 YOUTUBE_SEARCH_MAX_RESULTS = 20
 YOUTUBE_SEARCH_CACHE_TTL = 90.0
@@ -597,6 +606,19 @@ def _pick_best_subtitle_candidate(
     return max(candidates, key=os.path.getmtime)
 
 
+def _subtitle_language_variants(language: str) -> List[str]:
+    """Return language code variants including known legacy aliases."""
+
+    normalized = language.strip().lower()
+    if not normalized:
+        return []
+    variants = [normalized]
+    for alias in sorted(LANGUAGE_CODE_ALIASES.get(normalized, set())):
+        if alias not in variants:
+            variants.append(alias)
+    return variants
+
+
 def _subtitle_language_matches_track(available_language: str, requested_language: str) -> bool:
     """Return True when an available track language matches the requested language."""
 
@@ -604,10 +626,17 @@ def _subtitle_language_matches_track(available_language: str, requested_language
     requested = requested_language.strip().lower()
     if not available or not requested:
         return False
-    if requested.endswith(".*"):
-        prefix = requested[:-2]
-        return available == prefix or available.startswith(f"{prefix}-") or available.startswith(f"{prefix}_")
-    return available == requested or available.startswith(f"{requested}-") or available.startswith(f"{requested}_")
+
+    requested_variants = _subtitle_language_variants(
+        requested[:-2] if requested.endswith(".*") else requested
+    )
+    for variant in requested_variants:
+        if requested.endswith(".*"):
+            if available == variant or available.startswith(f"{variant}-") or available.startswith(f"{variant}_"):
+                return True
+        elif available == variant or available.startswith(f"{variant}-") or available.startswith(f"{variant}_"):
+            return True
+    return False
 
 
 def _matching_subtitle_languages(
