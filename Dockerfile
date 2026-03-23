@@ -2,6 +2,7 @@ FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    gosu \
     curl \
     unzip \
     ca-certificates \
@@ -29,7 +30,6 @@ RUN mkdir -p /config
 
 # Create the runtime user
 RUN useradd -m appuser && chown -R appuser /app /config
-USER appuser
 
 ENV FLASK_APP=app.py
 ENV FLASK_ENV=production
@@ -37,4 +37,8 @@ ENV YT2RADARR_CONFIG_DIR=/config
 
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+COPY ./entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+
+CMD ["gunicorn", "--no-control-socket", "--bind", "0.0.0.0:5000", "app:app"]
