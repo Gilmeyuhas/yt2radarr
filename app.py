@@ -104,6 +104,9 @@ YTDLP_FORMAT_SELECTOR = (
     "bestvideo[height>=1440]+bestaudio/"
     "bestvideo[height>=1080]+bestaudio/"
     "bestvideo[height>=720]+bestaudio/"
+    "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/"
+    "bestvideo+bestaudio/"
+    "best[vcodec^=avc1]/"
     "95/"
     "best"
 )
