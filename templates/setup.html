@@ -100,6 +100,17 @@
               />
             </div>
 
+            <div class="form-group form-group--with-note">
+              <label for="radarr_import_mode">After download, add to library</label>
+              <select id="radarr_import_mode" name="radarr_import_mode">
+                {% set _im = config.get('radarr_import_mode', 'import') %}
+                <option value="import" {% if _im == 'import' %}selected{% endif %}>Import automatically (recommended)</option>
+                <option value="rescan" {% if _im == 'rescan' %}selected{% endif %}>Rescan only (stage for manual import)</option>
+                <option value="off" {% if _im == 'off' %}selected{% endif %}>Do nothing (I'll import manually)</option>
+              </select>
+              <p class="form-note">yt2radarr writes files directly into the library folder, but Radarr/Sonarr won't show them until they're imported. "Import automatically" triggers a Radarr rescan + ManualImport after each movie download, and a Sonarr series rescan after each TV extra. Applies to items matched to a Radarr/Sonarr entry (not standalone downloads).</p>
+            </div>
+
             <div class="form-check">
               <input
                 type="checkbox"

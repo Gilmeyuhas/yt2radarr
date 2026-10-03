@@ -285,6 +285,22 @@ h2 {
   line-height: 1.6;
 }
 
+/* Allow a form-group that carries a description to wrap the note onto its
+   own full-width line below the control (aligned under the input), instead
+   of squeezing it into the flex row next to the label/select. */
+.form-group--with-note {
+  flex-wrap: wrap;
+}
+.form-group--with-note .form-note {
+  flex-basis: 100%;
+  margin: 6px 0 0 150px;
+}
+@media (max-width: 600px) {
+  .form-group--with-note .form-note {
+    margin-left: 0;
+  }
+}
+
 .form-note strong {
   color: var(--color-heading);
 }

@@ -174,6 +174,9 @@ def _default_config() -> Dict:
         "path_overrides": [],
         "debug_mode": bool(os.environ.get("YT2RADARR_DEBUG", "").strip()),
         "cookie_file": "",
+        "radarr_import_mode": (
+            os.environ.get("RADARR_IMPORT_MODE", "import").strip().lower() or "import"
+        ),
         "subtitles": {
             "enabled_default": False,
             "langs_default": "en",
@@ -1046,6 +1049,11 @@ def _normalize_loaded_config(raw_config: Optional[Dict]) -> Dict:
 
     merged["debug_mode"] = bool(merged.get("debug_mode"))
 
+    import_mode = str(merged.get("radarr_import_mode") or "import").strip().lower()
+    if import_mode not in ("off", "rescan", "import"):
+        import_mode = "import"
+    merged["radarr_import_mode"] = import_mode
+
     cookie_file = str(merged.get("cookie_file") or "").strip()
     if not cookie_file:
         default_candidate = os.path.join(CONFIG_BASE, DEFAULT_COOKIE_FILENAME)
@@ -1352,6 +1360,150 @@ def _radarr_request(
     )
     response.raise_for_status()
     return response
+
+
+def _trigger_radarr_import(
+    movie_id: str,
+    target_path: str,
+    config: Dict,
+    log,
+) -> None:
+    """After a direct-to-library download, make Radarr register the new file.
+
+    Radarr does not auto-adopt files dropped into a movie folder. Depending on
+    `radarr_import_mode`:
+      - "off"    : do nothing (user imports manually)
+      - "rescan" : trigger RescanMovie only (stages file for manual import)
+      - "import" : run ManualImport for the downloaded file (default)
+    """
+
+    mode = str(config.get("radarr_import_mode") or "import").strip().lower()
+    if mode == "off":
+        log("Radarr import mode is 'off'; skipping automatic import.")
+        return
+
+    try:
+        mid = int(movie_id)
+    except (TypeError, ValueError):
+        log(f"WARNING: cannot trigger Radarr import — invalid movie id '{movie_id}'.")
+        return
+
+    # Always rescan first so Radarr sees the new file on disk.
+    try:
+        _radarr_request(
+            "POST",
+            "/api/v3/command",
+            config=config,
+            payload={"name": "RescanMovie", "movieIds": [mid]},
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        log(f"WARNING: Radarr RescanMovie failed: {exc}")
+        return
+
+    if mode == "rescan":
+        log("Triggered Radarr rescan (import mode 'rescan').")
+        return
+
+    # mode == "import": ask Radarr what it found, then import the matching file.
+    try:
+        mi = _radarr_request(
+            "GET",
+            "/api/v3/manualimport",
+            config=config,
+            params={"movieId": mid, "filterExistingFiles": "false"},
+        ).json()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        log(f"WARNING: Radarr manual-import lookup failed: {exc}")
+        return
+
+    target_abs = os.path.abspath(target_path)
+    entry = None
+    for item in mi if isinstance(mi, list) else []:
+        if os.path.abspath(str(item.get("path") or "")) == target_abs:
+            entry = item
+            break
+    if entry is None and mi:
+        # Fall back to the most recently added candidate for this movie.
+        entry = mi[0]
+    if entry is None:
+        log("WARNING: Radarr did not list the downloaded file for import; "
+            "left for manual import.")
+        return
+
+    rejections = entry.get("rejections") or []
+    if rejections:
+        reasons = ", ".join(
+            str(r.get("reason") or r) for r in rejections if r
+        )
+        log(f"WARNING: Radarr rejected auto-import ({reasons}); "
+            "left for manual import.")
+        return
+
+    quality = entry.get("quality")
+    languages = entry.get("languages") or []
+    if not quality:
+        log("WARNING: Radarr returned no quality for the file; "
+            "left for manual import.")
+        return
+
+    payload = {
+        "name": "ManualImport",
+        "importMode": "move",
+        "files": [
+            {
+                "path": entry.get("path"),
+                "movieId": mid,
+                "quality": quality,
+                "languages": languages,
+                "releaseGroup": entry.get("releaseGroup") or "",
+            }
+        ],
+    }
+    try:
+        _radarr_request("POST", "/api/v3/command", config=config, payload=payload)
+        log("Triggered Radarr import for the downloaded file.")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        log(f"WARNING: Radarr ManualImport failed: {exc}")
+
+
+def _trigger_sonarr_rescan(
+    series_id: str,
+    config: Dict,
+    log,
+) -> None:
+    """After a direct-to-library Sonarr download, make Sonarr pick up the file.
+
+    yt2radarr's Sonarr workflow saves series *extras* (trailers,
+    behind-the-scenes, etc.) into the series folder rather than importing
+    numbered episodes, so there is no episode-level ManualImport to run. A
+    RescanSeries makes Sonarr detect the new files on disk. Honors
+    `radarr_import_mode`: "off" skips; "rescan" and "import" both rescan.
+    """
+
+    mode = str(config.get("radarr_import_mode") or "import").strip().lower()
+    if mode == "off":
+        log("Radarr import mode is 'off'; skipping Sonarr rescan.")
+        return
+
+    if not (config.get("sonarr_url") and config.get("sonarr_api_key")):
+        return
+
+    try:
+        sid = int(series_id)
+    except (TypeError, ValueError):
+        log(f"WARNING: cannot trigger Sonarr rescan — invalid series id '{series_id}'.")
+        return
+
+    try:
+        requests.post(
+            f"{config['sonarr_url']}/api/v3/command",
+            headers={**_sonarr_headers(config), "Content-Type": "application/json"},
+            json={"name": "RescanSeries", "seriesId": sid},
+            timeout=10,
+        ).raise_for_status()
+        log("Triggered Sonarr rescan for the series.")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        log(f"WARNING: Sonarr RescanSeries failed: {exc}")
 
 
 def _lookup_tmdb_movie(tmdb_id: str, config: Dict) -> Optional[Dict]:
@@ -3483,6 +3635,10 @@ def process_download_job(
 
         _job_status(job_id, "processing", progress=100)
         log(f"Success! Video saved as '{target_path}'.")
+        if media_type == "movie" and not standalone and not extra and movie_id:
+            _trigger_radarr_import(movie_id, target_path, config, log)
+        elif media_type == "series" and not standalone and series_id:
+            _trigger_sonarr_rescan(series_id, config, log)
         _mark_job_success(job_id)
     except JobCancelled:
         _cleanup_temp_files(expected_pattern)
@@ -3715,6 +3871,11 @@ def setup():
         overrides = normalize_path_overrides(override_entries)
         errors.extend(override_errors)
         debug_mode = bool(request.form.get("debug_mode"))
+        import_mode = str(
+            request.form.get("radarr_import_mode") or "import"
+        ).strip().lower()
+        if import_mode not in ("off", "rescan", "import"):
+            import_mode = "import"
         subtitles_enabled_default = bool(request.form.get("subtitles_enabled_default"))
         subtitles_langs_default = str(
             request.form.get("subtitles_langs_default") or ""
@@ -3749,6 +3910,7 @@ def setup():
                 "tv_file_paths": tv_file_paths,
                 "path_overrides": overrides,
                 "debug_mode": debug_mode,
+                "radarr_import_mode": import_mode,
                 "subtitles": {
                     "enabled_default": subtitles_enabled_default,
                     "langs_default": subtitles_langs_default or "en",
